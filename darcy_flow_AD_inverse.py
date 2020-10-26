@@ -124,6 +124,7 @@ class TimeDependentAdvectionDiffusion:
             gls_stab - Set true to turn on Galerkin Least-Squares stabilization. Currently unsupported
             debug - Turn on debug mode with verbose reporting and plotting
         '''
+        self.debug = debug
 
         # Set member variables describing the problem
         self.mesh = mesh
@@ -131,12 +132,6 @@ class TimeDependentAdvectionDiffusion:
         self.prior = prior
         self.misfit = misfit
         self.u_0 = u_0
-
-        # Zero boundary conditions TODO: Change these such that they are passed in during initialization
-        #  self.bc_state_dirichlet = dl.DirichletBC(Vh[STATE], dl.Constant(0.0), no_slip_boundary)
-        self.bc_adjoint_dirichlet = dl.DirichletBC(Vh[ADJOINT], dl.Constant(0.0), no_slip_boundary)
-        #  self.left_inflow = dl.DirichletBC(Vh[STATE], dl.Constant(1.0), left_slit_boundary)
-        #  self.left_inflow.apply(self.u_0.vector())
 
         # Assume constant timestepping
         self.simulation_times = simulation_times
@@ -156,11 +151,30 @@ class TimeDependentAdvectionDiffusion:
 
         dt_expr = dl.Constant(dt)
 
-        source1 = dl.Expression('std::min(0.5, std::exp(-10000*(std::pow(x[0]-0.2,2) +  std::pow((x[1]-0.22)/3,2))))', element=Vh[STATE].ufl_element())
-        source2 = dl.Expression('std::min(0.5, std::exp(-10000*(std::pow(x[0]-0.2,2) +  std::pow((x[1]-0.8)/3,2))))', element=Vh[STATE].ufl_element())
-        source3 = dl.Expression('std::min(0.5, std::exp(-10000*(std::pow(x[0]-0.8,2) +  std::pow((x[1]-0.2)/3,2))))', element=Vh[STATE].ufl_element())
-        source4 = dl.Expression('std::min(0.5, std::exp(-10000*(std::pow(x[0]-0.8,2) +  std::pow((x[1]-0.85)/3,2))))', element=Vh[STATE].ufl_element())
-        source = source1 + source2 + source3 + source4
+        # Describe sources TODO Make this programmatic
+        N_source_grid_size = 4
+        source = None
+        s_decay = 1000
+        s_interval = 0.2
+        bottom_left_x = L/2.0 - (N_source_grid_size-1.0) / 2.0 * s_interval
+        bottom_left_y = W/2.0 - (N_source_grid_size-1.0) / 2.0 * s_interval
+
+        for i in range(N_source_grid_size):
+            for j in range(N_source_grid_size):
+                s_x = bottom_left_x + s_interval * i
+                s_y = bottom_left_y + s_interval * j
+
+                source_point = dl.Expression('min(0.5, exp(-s * (pow(x[0] - s_x, 2) + pow(x[1] - s_y, 2))))', \
+                        element=Vh[STATE].ufl_element(), s=s_decay, s_x=s_x, s_y=s_y)
+                if source is None:
+                    source = source_point
+                else:
+                    source += source_point
+        #  source1 = dl.Expression('std::min(0.5, std::exp(-10000*(std::pow(x[0]-0.2,2) +  std::pow((x[1]-0.22)/3,2))))', element=Vh[STATE].ufl_element())
+        #  source2 = dl.Expression('std::min(0.5, std::exp(-10000*(std::pow(x[0]-0.2,2) +  std::pow((x[1]-0.8)/3,2))))', element=Vh[STATE].ufl_element())
+        #  source3 = dl.Expression('std::min(0.5, std::exp(-10000*(std::pow(x[0]-0.8,2) +  std::pow((x[1]-0.2)/3,2))))', element=Vh[STATE].ufl_element())
+        #  source4 = dl.Expression('std::min(0.5, std::exp(-10000*(std::pow(x[0]-0.8,2) +  std::pow((x[1]-0.85)/3,2))))', element=Vh[STATE].ufl_element())
+        #  source = source1 + source2 + source3 + source4
 
         ############################################################################################
         # Galerkin Least Squares stabilization terms TODO: Currently unsupported
@@ -198,7 +212,7 @@ class TimeDependentAdvectionDiffusion:
         # LHS variational form to be solved at each time step
         self.L_varf = M_varf + dt_expr * N_varf + stab_varf
         self.S_varf = dt_expr * ufl.inner(source, u_test) * ufl.dx
-        self.L_rhs_varf = ufl.inner(self.u_old, u_test) * ufl.dx + self.S_varf
+        self.L_rhs_varf = ufl.inner(self.u_old, u_test) * ufl.dx
         self.Lt_varf = M_varf + dt_expr * Nt_varf + stab_varf
         self.Lt_rhs_varf = ufl.inner(self.p_old, p_test) * ufl.dx
 
@@ -293,8 +307,8 @@ class TimeDependentAdvectionDiffusion:
         u = dl.Function(self.Vh[STATE])
 
         for t in self.simulation_times[1::]:
-            #  dl.solve(self.L_varf == self.L_rhs_varf, u, bcs=[self.bc_state_dirichlet, self.left_inflow])
-            dl.solve(self.L_varf == self.L_rhs_varf, u)
+            rhs = self.L_rhs_varf + self.S_varf
+            dl.solve(self.L_varf == rhs, u)
             out.store(u.vector(), t)
             self.u_s.store(u.vector(), t) #TODO Fix duplicate storage
             self.u_old.assign(u)
@@ -322,9 +336,7 @@ class TimeDependentAdvectionDiffusion:
         # TODO replace this with affine decomposition
         self.kappa.vector().set_local(x[PARAMETER])
 
-        #  L = dl.as_backend_type(dl.assemble_system(self.L_varf, self.L_rhs_varf, bcs=[self.bc_state_dirichlet, self.left_inflow])[0]).mat()
-
-        L = dl.as_backend_type(dl.assemble_system(self.L_varf, self.L_rhs_varf)[0]).mat()
+        L = dl.as_backend_type(dl.assemble(self.L_varf)).mat()
         Psi = L.matMult(self.phi.mat())
 
         # Reduced LHS
@@ -333,8 +345,8 @@ class TimeDependentAdvectionDiffusion:
         # Reduced source term
         S = dl.assemble(self.S_varf)
         S_r = dl.Vector()
-        Psi = dl.PETScMatrix(Psi)
-        Psi.transpmult(S, S_r)
+        Psi_p = dl.PETScMatrix(Psi)
+        Psi_p.transpmult(S, S_r)
 
         # Reduced mass matrix
         M_phi = dl.as_backend_type(self.M).mat().matMult(self.phi.mat())
@@ -349,7 +361,7 @@ class TimeDependentAdvectionDiffusion:
             u_s.store(u, t)
 
         if self.debug:
-            nb.show_solution(self.Vh[STATE], self.u_0.vector(), u_s, mytitle="Solution RB", times=np.linspace(0., 12., 6))
+            nb.show_solution(self.Vh[STATE], self.u_0.vector(), u_s, mytitle="Solution RB", times=np.linspace(0., 6., 6))
             plt.show()
 
     def solveAdj(self, out, x):
@@ -373,7 +385,7 @@ class TimeDependentAdvectionDiffusion:
         self.M.init_vector(grad_state_snap, 0)
 
         for t in self.simulation_times[::-1]:
-            Lt, rhs = dl.assemble_system(self.Lt_varf, self.Lt_rhs_varf, bcs=self.bc_adjoint_dirichlet)
+            Lt, rhs = dl.assemble_system(self.Lt_varf, self.Lt_rhs_varf)
             grad_state.retrieve(grad_state_snap, t)
             rhs.axpy(-0.1, grad_state_snap)
 
@@ -635,7 +647,7 @@ if __name__ == "__main__":
         pass
 
     # Turn on debug mode to plot all quantities and print debug values
-    debug = False
+    debug = True
 
     #np.random.seed(123)
     sep = "\n"+"#"*80+"\n"
@@ -667,14 +679,6 @@ if __name__ == "__main__":
     if rank == 0:
         print(sep, "Set up Prior Information and model", sep)
 
-    #  ic_expr = dl.Expression(
-        #  'std::min(0.9, std::exp(-1000*(std::pow(x[0]-0.05,2) +  std::pow((x[1]-0.2)/3,2))) \
-                #  + std::exp(-1000*(std::pow(x[0]-1.0,2) +  std::pow((x[1]-0.2)/3,2))) + \
-                #  std::exp(-1000*(std::pow(x[0]-0.6,2) +  std::pow((x[1]-0.2)/3,2))))',
-        #  element=Vh.ufl_element())
-    #  ic_expr = dl.Expression(
-        #  'std::min(0.9, std::exp(-1000*(std::pow(x[0]-0.05,2) +  std::pow((x[1]-0.2)/3,2))))',
-        #  element=Vh.ufl_element())
     ic_expr = dl.Expression('0.0',element=Vh.ufl_element())
 
     u_0 = dl.interpolate(ic_expr, Vh)
@@ -693,6 +697,8 @@ if __name__ == "__main__":
     delta = gamma/(correlation_length * correlation_length)
     prior = BiLaplacianPrior(Vh, gamma, delta, robin_bc=True)
 
+    # The true diffusivity is drawn from the same distribution as the prior but 
+    # with a different mean
     prior.mean = dl.interpolate(dl.Constant(0.002/ksv), Vh).vector()
     noise = dl.Vector()
     prior.init_vector(noise, "noise")
@@ -731,7 +737,7 @@ if __name__ == "__main__":
 
     # Define simulation and observation times. Observations are made every other time step after t_init
     t_init = 0.
-    t_final = 12.
+    t_final = 6.
     t_1 = 1.
     dt = .1
     observation_dt = .2

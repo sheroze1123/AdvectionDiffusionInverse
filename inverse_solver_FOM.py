@@ -125,6 +125,7 @@ class TimeDependentAdvectionDiffusion:
         # Zero boundary conditions TODO: Change these such that they are passed in during initialization
         self.bc_state_dirichlet = dl.DirichletBC(Vh[STATE], dl.Constant(0.0), no_slip_boundary)
         self.bc_adjoint_dirichlet = dl.DirichletBC(Vh[ADJOINT], dl.Constant(0.0), no_slip_boundary)
+        self.left_inflow = dl.DirichletBC(Vh[STATE], dl.Constant(0.5), left_slit_boundary)
 
         # Assume constant timestepping
         self.simulation_times = simulation_times
@@ -266,7 +267,7 @@ class TimeDependentAdvectionDiffusion:
         u = dl.Function(self.Vh[STATE])
 
         for t in self.simulation_times[1::]:
-            dl.solve(self.L_varf == self.L_rhs_varf, u, bcs=self.bc_state_dirichlet)
+            dl.solve(self.L_varf == self.L_rhs_varf, u, bcs=[self.bc_state_dirichlet, self.left_inflow])
             out.store(u.vector(), t)
             self.u_s.store(u.vector(), t) #TODO Fix duplicate storage
             self.u_old.assign(u)
@@ -450,6 +451,10 @@ def no_slip_boundary(x, on_boundary):
         ((x[0] > dl.DOLFIN_EPS and x[0] < 2.2 - dl.DOLFIN_EPS)\
              or (x[1] < dl.DOLFIN_EPS and x[1] > 0.41 - dl.DOLFIN_EPS))
 
+def left_slit_boundary(x, on_boundary):
+    '''In-flow boundary from the left through a slit'''
+    return (x[0] < dl.DOLFIN_EPS and (x[1] > 0.1 and x[1] < 0.3))
+
 def computeVelocityField(mesh, plot_velocity=False):
     '''Solves the steady Stokes flow given the geometry and the in-flow conditions.
     This velocity field is computed from the DFG benchmark
@@ -499,7 +504,8 @@ if __name__ == "__main__":
     except:
         pass
 
-    plot_stuff = False
+    # Turn on debug mode to plot all quantities and print debug values
+    debug = True
 
     #np.random.seed(123)
     sep = "\n"+"#"*80+"\n"
@@ -520,7 +526,7 @@ if __name__ == "__main__":
     rank = dl.MPI.rank(mesh.mpi_comm())
     nproc = dl.MPI.size(mesh.mpi_comm())
 
-    velocity = computeVelocityField(mesh, plot_stuff)
+    velocity = computeVelocityField(mesh, debug)
 
     # Function space for state, adjoint, and parameter variables are chosen to be the same
     Vh = dl.FunctionSpace(mesh, "Lagrange", 1)
@@ -536,17 +542,17 @@ if __name__ == "__main__":
     if rank == 0:
         print(sep, "Set up Prior Information and model", sep)
 
-    #  ic_expr = dl.Expression(
-        #  'std::min(0.9, std::exp(-1000*(std::pow(x[0]-0.05,2) +  std::pow((x[1]-0.2)/3,2))) \
-                #  + std::exp(-1000*(std::pow(x[0]-1.0,2) +  std::pow((x[1]-0.2)/3,2))) + \
-                #  std::exp(-1000*(std::pow(x[0]-0.6,2) +  std::pow((x[1]-0.2)/3,2))))',
-        #  element=Vh.ufl_element())
     ic_expr = dl.Expression(
-        'std::min(0.9, std::exp(-1000*(std::pow(x[0]-0.05,2) +  std::pow((x[1]-0.2)/3,2))))',
+        'std::min(0.9, std::exp(-1000*(std::pow(x[0]-0.05,2) +  std::pow((x[1]-0.2)/3,2))) \
+                + std::exp(-1000*(std::pow(x[0]-1.0,2) +  std::pow((x[1]-0.2)/3,2))) + \
+                std::exp(-1000*(std::pow(x[0]-0.6,2) +  std::pow((x[1]-0.2)/3,2))))',
         element=Vh.ufl_element())
+    #  ic_expr = dl.Expression(
+        #  'std::min(0.9, std::exp(-1000*(std::pow(x[0]-0.05,2) +  std::pow((x[1]-0.2)/3,2))))',
+        #  element=Vh.ufl_element())
 
     u_0 = dl.interpolate(ic_expr, Vh)
-    if plot_stuff:
+    if debug:
         nb.plot(u_0, mytitle="Initial condition interpolated")
         plt.show()
 
@@ -561,7 +567,7 @@ if __name__ == "__main__":
     true_kappa = dl.interpolate(dl.Constant(np.log(0.002)), Vh).vector()
 
     # Visualize draws from the prior for debugging purposes
-    if plot_stuff:
+    if debug:
         noise = dl.Vector()
         prior.init_vector(noise, "noise")
             
@@ -587,7 +593,7 @@ if __name__ == "__main__":
 
     # Define simulation and observation times. Observations are made every other time step after t_init
     t_init = 0.
-    t_final = 6.
+    t_final = 12.
     t_1 = 1.
     dt = .1
     observation_dt = .2
@@ -625,8 +631,8 @@ if __name__ == "__main__":
     parRandom.normal_perturb(noise_std_dev, misfit.data)
     misfit.noise_variance = noise_std_dev*noise_std_dev
 
-    if plot_stuff:
-        nb.show_solution(Vh, u_0.vector(), x[STATE], "Solution")
+    if debug:
+        nb.show_solution(Vh, u_0.vector(), x[STATE], mytitle="Solution", times=np.linspace(t_init, t_final, 6))
         plt.show()
 
     if rank == 0:
@@ -636,7 +642,7 @@ if __name__ == "__main__":
     # Use hippylib to perform the gradient and Hessian check
     modelVerify(problem, m0, is_quadratic=True,
                 misfit_only=False,  verbose=(rank == 0))
-    if plot_stuff:
+    if debug:
         plt.show()
 
     # Due to stellar naming conventions adopted by Hippylib, below means the true full Hessian
@@ -729,7 +735,7 @@ if __name__ == "__main__":
 
         if not descent:
             print("Line search failed. No descent achieved in 18 backtracking steps")
-            if plot_stuff:
+            if debug:
                 current_parameter = dl.Function(Vh)
                 current_parameter.vector().set_local(m)
                 nb.plot(current_parameter)
