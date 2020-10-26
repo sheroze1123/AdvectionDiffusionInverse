@@ -157,7 +157,7 @@ class TimeDependentAdvectionDiffusion:
         N_source_grid_size = 4
         source = None
         s_decay = 1000
-        s_interval = 0.2
+        s_interval = 0.25
         bottom_left_x = L/2.0 - (N_source_grid_size-1.0) / 2.0 * s_interval
         bottom_left_y = W/2.0 - (N_source_grid_size-1.0) / 2.0 * s_interval
 
@@ -685,11 +685,9 @@ if __name__ == "__main__":
 
     # Gaussian priors in infinite dimensions are created following this guide 
     # http://g2s3.com/labs/notebooks/Gaussian_priors.html and using hippylib. 
-    # The values below are chosen to have a correlation length ~ 2.0 and pointwise variance ~ 3.0
-    #  gamma = 4.0
-    #  delta = 0.66
+    # The prior is parametrized by the correlation length and the pointwise variance
     correlation_length = 0.5
-    prior_std_dev = 0.0005/ksv
+    prior_std_dev = 0.005/ksv
     gamma = 1.0/(correlation_length * prior_std_dev)
     delta = gamma/(correlation_length * correlation_length)
     prior = BiLaplacianPrior(Vh, gamma, delta, robin_bc=True)
@@ -735,7 +733,7 @@ if __name__ == "__main__":
     # Define simulation and observation times. Observations are made every other time step after t_init
     t_init = 0.
     t_final = 6.
-    t_1 = 1.
+    t_1 = 0.2
     dt = .1
     observation_dt = .2
 
@@ -797,7 +795,9 @@ if __name__ == "__main__":
         ii += 1
 
     UU, SS, VV = np.linalg.svd(S)
-    plt.plot(SS); plt.show()
+
+    if debug:
+        plt.semilogy(SS); plt.show()
     pod_thresh = 1e-13
     basis_size = np.sum(SS > pod_thresh)
     print(f"Number of singular values larger than {pod_thresh}: {basis_size}")
@@ -824,13 +824,13 @@ if __name__ == "__main__":
         print(sep, "Test the gradient and the Hessian of the model", sep)
     m0 = true_kappa.copy()
 
-    # Use hippylib to perform the gradient and Hessian check
-    n_eps = 24
-    eps_begin_idx = np.ceil(np.log(0.001/ksv)/np.log(0.5)) # hippylib finite differencing isn't smart
-    eps = np.power(.5, np.arange(eps_begin_idx, n_eps+eps_begin_idx))
-    modelVerify(problem, m0, is_quadratic=True,
-                misfit_only=False,  verbose=(rank == 0), eps=eps)
     if debug:
+        # Use hippylib to perform the gradient and Hessian check
+        n_eps = 24
+        eps_begin_idx = np.ceil(np.log(0.001/ksv)/np.log(0.5)) # hippylib finite differencing isn't smart
+        eps = np.power(.5, np.arange(eps_begin_idx, n_eps+eps_begin_idx))
+        modelVerify(problem, m0, is_quadratic=True,
+                misfit_only=False,  verbose=(rank == 0), eps=eps)
         plt.show()
 
     # Due to stellar naming conventions adopted by Hippylib, below means the true full Hessian
