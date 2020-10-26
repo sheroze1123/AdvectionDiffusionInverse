@@ -9,8 +9,10 @@ from petsc4py import PETSc
 # Compute MAP estimate using gradients
 from scipy.optimize import minimize, Bounds
 
-ksv = 0.001
+# Scaling of the parameter to handle finite difference check issues with hippylib
 ksv = 1.0
+
+# Dimensions of the mesh extremeties
 L = 1.0
 W = 1.00
 
@@ -170,11 +172,6 @@ class TimeDependentAdvectionDiffusion:
                     source = source_point
                 else:
                     source += source_point
-        #  source1 = dl.Expression('std::min(0.5, std::exp(-10000*(std::pow(x[0]-0.2,2) +  std::pow((x[1]-0.22)/3,2))))', element=Vh[STATE].ufl_element())
-        #  source2 = dl.Expression('std::min(0.5, std::exp(-10000*(std::pow(x[0]-0.2,2) +  std::pow((x[1]-0.8)/3,2))))', element=Vh[STATE].ufl_element())
-        #  source3 = dl.Expression('std::min(0.5, std::exp(-10000*(std::pow(x[0]-0.8,2) +  std::pow((x[1]-0.2)/3,2))))', element=Vh[STATE].ufl_element())
-        #  source4 = dl.Expression('std::min(0.5, std::exp(-10000*(std::pow(x[0]-0.8,2) +  std::pow((x[1]-0.85)/3,2))))', element=Vh[STATE].ufl_element())
-        #  source = source1 + source2 + source3 + source4
 
         ############################################################################################
         # Galerkin Least Squares stabilization terms TODO: Currently unsupported
