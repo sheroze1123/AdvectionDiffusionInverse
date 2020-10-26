@@ -603,11 +603,13 @@ def computeVelocityField(mesh, plot_velocity=False):
        def eval_cell(self, values, x, ufc_cell):
            cell = dl.Cell(self.mesh, ufc_cell.index)
            n = cell.normal(ufc_cell.local_facet)
+           # Parabolic in-flow flux
            g = -4.0 * self.max_velocity * x[1] * (W - x[1])/ (W * W)
            values[0] = (x[0] < dl.DOLFIN_EPS) * g*n[0]
            values[1] = 0.0
        def value_shape(self):
            return (2,)
+
     G = BoundarySource(mesh)
 
     bc1 = dl.DirichletBC(XW.sub(0), G, v_boundary)
@@ -629,9 +631,7 @@ def computeVelocityField(mesh, plot_velocity=False):
     qh = dl.project(q,Wh)
 
     if plot_velocity:
-        #plt.figure(figsize=(20,10))
         nb.plot(vh, subplot_loc=211, mytitle="Velocity")
-        #  nb.plot(vh_norm, subplot_loc=312, mytitle="Velocity magnitude")
         nb.plot(qh, subplot_loc=212,mytitle="Pressure")
         plt.show()
 
@@ -703,7 +703,6 @@ if __name__ == "__main__":
     prior.sample(noise, true_kappa)
     sampled_values = ksv * true_kappa[:]; true_kappa.set_local(sampled_values)
 
-    #true_kappa = dl.interpolate(dl.Constant(0.002/ksv), Vh).vector()
     prior.mean = dl.interpolate(dl.Constant(0.005/ksv), Vh).vector()
 
     # Visualize draws from the prior for debugging purposes
