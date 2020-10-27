@@ -92,6 +92,28 @@ class SpaceTimePointwiseStateObservation(Misfit):
             # Gradient w.r.t parameter is zero
             pass
 
+    def grad_reduced(self, i, x, out, phi):
+        ''' Compute the gradient of the ROM cost function with respecto to i = {STATE, PARAMETER} '''
+        out.zero()
+
+        u_r_snapshot = dl.Vector()
+        phi.init_vector(u_r_snapshot, 1)
+        B_phi = dl.PETScMatrix(dl.as_backend_type(self.B).mat().matMult(phi.mat()))
+        
+        if i == STATE:
+            # Gradient w.r.t state is simply B^T(Bu - d)
+            for t in self.observation_times:
+                x.retrieve(self.u_snapshot, t)
+                self.B.mult(self.u_snapshot, self.Bu_snapshot)
+                self.data.retrieve(self.data_snapshot, t)
+                self.Bu_snapshot.axpy(-1., self.data_snapshot)
+                self.Bu_snapshot *= 1./self.noise_variance
+                B_phi.transpmult(self.Bu_snapshot, u_r_snapshot)
+                out.store(u_r_snapshot, t)
+        else:
+            # Gradient w.r.t parameter is zero
+            pass
+
     def setLinearizationPoint(self, x, gauss_newton_approx=False):
         pass
 
@@ -403,7 +425,6 @@ class TimeDependentAdvectionDiffusion:
         '''Perform implicit time-stepping and solve the adjoint problem in the 
         reduced subpsace determined by the basis phi. Uses a Petrov-Galerkin projection'''
         out.zero()
-        self.p_tildes.initialize(self.phi, 1)
         self.p_tildes.zero()
 
         grad_state = TimeDependentVector(self.simulation_times)
@@ -423,11 +444,13 @@ class TimeDependentAdvectionDiffusion:
         p = dl.Vector()
         self.M.init_vector(p, 0)
 
+        L_r_t = dl.PETScMatrix(self.L_r.mat().transpose())
+
         for t in self.simulation_times[1::]:
             self.M_r.transpmult(p_r, rhs)
             grad_state.retrieve(grad_state_snap, t)
             rhs.axpy(-1., grad_state_snap)
-            dl.solve(self.L_r.transpose(), p_r, rhs, "cg")
+            dl.solve(L_r_t, p_r, rhs, "cg")
             out.store(p_r, t)
             self.phi.mult(p_r, p)
             self.p_tildes.store(p, t)
@@ -633,7 +656,9 @@ def computeVelocityField(mesh, plot_velocity=False):
     prior.sample(noise, true_kappa)
     sampled_values = np.exp(ksv * true_kappa[:]); true_kappa.set_local(sampled_values)
     K.vector().set_local(true_kappa)
-    nb.plot(K, mytitle="Permeability field"); plt.show()
+
+    if plot_velocity:
+        nb.plot(K, mytitle="Permeability field"); plt.show()
 
 
     # Viscosity (assumed to be scalar)
@@ -691,7 +716,7 @@ if __name__ == "__main__":
         pass
 
     # Turn on debug mode to plot all quantities and print debug values
-    debug = True
+    debug = False
 
     #np.random.seed(123)
     sep = "\n"+"#"*80+"\n"
@@ -861,9 +886,53 @@ if __name__ == "__main__":
     problem.set_reduced_basis(basis)
 
     utrue_r = problem.generate_vector("REDUCED_STATE")
-    x = [utrue_r, true_kappa, None]
+    ptrue_r = problem.generate_vector("REDUCED_STATE")
+    x = [utrue_r, true_kappa, ptrue_r]
     problem.solveReducedFwd(x[STATE], x)
+    problem.solveReducedAdj(x[ADJOINT], x)
+    mg = problem.generate_vector(PARAMETER)
+    grad_norm_r = problem.evalGradientParameter(x, mg, use_ROM=True)
+    print(f"Norm of the reduced gradient {grad_norm_r}")
 
+    if debug:
+        h = problem.generate_vector(PARAMETER)
+        parRandom.normal(1., h)
+        
+        u_r = problem.generate_vector("REDUCED_STATE")
+        p_r = problem.generate_vector("REDUCED_STATE")
+        x_r = [u_r, true_kappa, p_r]
+        problem.solveReducedFwd(x[0], x)
+        problem.solveReducedAdj(x[2], x)
+        x = [problem.u_tildes, true_kappa, problem.p_tildes]
+        cx = problem.cost(x)
+        
+        grad_x = problem.generate_vector(PARAMETER)
+        problem.evalGradientParameter(x, grad_x, misfit_only=False, use_ROM=False)
+        grad_xh = grad_x.inner( h )
+        
+        n_eps = 32
+        eps = np.power(.5, np.arange(1., n_eps+1))
+        err_grad = np.zeros(n_eps)
+        
+        for i in range(n_eps):
+            my_eps = eps[i]
+            
+            u_r = problem.generate_vector("REDUCED_STATE")
+            p_r = problem.generate_vector("REDUCED_STATE")
+            k = problem.generate_vector(PARAMETER)
+            x_r_plus = [u_r, k, p_r]
+            x_r_plus[1].axpy(1., true_kappa)
+            x_r_plus[1].axpy(my_eps, h)
+            problem.solveReducedFwd(x_r_plus[0], x_r_plus)
+            problem.solveReducedAdj(x_r_plus[2], x_r_plus)
+            x_plus = [problem.u_tildes, k, problem.p_tildes]
+            
+            dc = problem.cost(x_plus)[0] - cx[0]
+            err_grad[i] = abs(dc/my_eps - grad_xh)
+
+        plt.loglog(eps, err_grad, "-ob", eps, eps*(err_grad[0]/eps[0]), "-.k")
+        plt.title("FD Gradient Check for Reduced Model")
+        plt.show()
     ####################################################################
 
     if rank == 0:
