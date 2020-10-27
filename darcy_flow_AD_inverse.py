@@ -236,6 +236,13 @@ class TimeDependentAdvectionDiffusion:
 
         # Setup required objects for solving reduced order models
         phi = None
+        self.L_r = None
+        self.M_r = None
+        self.S_r = None
+        self.u_tildes = TimeDependentVector(self.simulation_times)
+        self.u_tildes.initialize(self.M, 0)
+        self.p_tildes = TimeDependentVector(self.simulation_times)
+        self.p_tildes.initialize(self.M, 0)
         # TODO, have L_phi and M_phi here for PG projection speed-up once affine decomposition is done
 
     def set_reduced_basis(self, phi):
@@ -321,8 +328,10 @@ class TimeDependentAdvectionDiffusion:
         self.phi.transpmult(self.u_0.vector(), u_r)
         out.store(u_r, 0.)
 
-        u_s = self.generate_vector(STATE)
-        u_s.store(self.u_0.vector(), 0.)
+        self.u_tildes.zero()
+
+        # TODO : Project and unproject w/ phi
+        self.u_tildes.store(self.u_0.vector(), 0.)
 
         rhs = dl.Vector()
         self.phi.init_vector(rhs, 1)
@@ -330,35 +339,34 @@ class TimeDependentAdvectionDiffusion:
         u = dl.Vector()
         self.M.init_vector(u, 0)
 
-        # TODO replace this with affine decomposition
+        # TODO replace this with affine decomposition to avoid assembly when parameters change
         self.kappa.vector().set_local(x[PARAMETER])
-
         L = dl.as_backend_type(dl.assemble(self.L_varf)).mat()
         Psi = L.matMult(self.phi.mat())
 
         # Reduced LHS
-        L_r = dl.PETScMatrix(Psi.transposeMatMult(Psi))
+        self.L_r = dl.PETScMatrix(Psi.transposeMatMult(Psi))
 
         # Reduced source term
         S = dl.assemble(self.S_varf)
-        S_r = dl.Vector()
+        self.S_r = dl.Vector()
         Psi_p = dl.PETScMatrix(Psi)
-        Psi_p.transpmult(S, S_r)
+        Psi_p.transpmult(S, self.S_r)
 
         # Reduced mass matrix
         M_phi = dl.as_backend_type(self.M).mat().matMult(self.phi.mat())
-        M_r = dl.PETScMatrix(Psi.transposeMatMult(M_phi))
+        self.M_r = dl.PETScMatrix(Psi.transposeMatMult(M_phi))
 
         for t in self.simulation_times[1::]:
-            M_r.mult(u_r, rhs)
-            rhs.axpy(1., S_r)
-            dl.solve(L_r, u_r, rhs, "cg")
+            self.M_r.mult(u_r, rhs)
+            rhs.axpy(1., self.S_r)
+            dl.solve(self.L_r, u_r, rhs, "cg")
             out.store(u_r, t)
             self.phi.mult(u_r, u)
-            u_s.store(u, t)
+            self.u_tildes.store(u, t)
 
         if self.debug:
-            nb.show_solution(self.Vh[STATE], self.u_0.vector(), u_s, mytitle="Solution RB", times=np.linspace(0., 6., 6))
+            nb.show_solution(self.Vh[STATE], self.u_0.vector(), self.u_tildes, mytitle="Solution RB", times=np.linspace(0., 6., 6))
             plt.show()
 
     def solveAdj(self, out, x):
@@ -391,7 +399,40 @@ class TimeDependentAdvectionDiffusion:
             out.store(p, t)
             self.p_s.store(p, t) #TODO Fix duplicate storage
 
-    def evalGradientParameter(self, x, mg, misfit_only=False):
+    def solveReducedAdj(self, out, x):
+        '''Perform implicit time-stepping and solve the adjoint problem in the 
+        reduced subpsace determined by the basis phi. Uses a Petrov-Galerkin projection'''
+        out.zero()
+        self.p_tildes.initialize(self.phi, 1)
+        self.p_tildes.zero()
+
+        grad_state = TimeDependentVector(self.simulation_times)
+        grad_state.initialize(self.phi, 1)
+        self.misfit.grad_reduced(STATE, self.u_tildes, grad_state, self.phi)
+
+        # Set reduced initial condition
+        p_r = dl.Vector()
+        self.phi.init_vector(p_r, 1) # u = Phi * u_r
+
+        grad_state_snap = dl.Vector()
+        self.phi.init_vector(grad_state_snap, 1)
+
+        rhs = dl.Vector()
+        self.phi.init_vector(rhs, 1)
+
+        p = dl.Vector()
+        self.M.init_vector(p, 0)
+
+        for t in self.simulation_times[1::]:
+            self.M_r.transpmult(p_r, rhs)
+            grad_state.retrieve(grad_state_snap, t)
+            rhs.axpy(-1., grad_state_snap)
+            dl.solve(self.L_r.transpose(), p_r, rhs, "cg")
+            out.store(p_r, t)
+            self.phi.mult(p_r, p)
+            self.p_tildes.store(p, t)
+
+    def evalGradientParameter(self, x, mg, misfit_only=False, use_ROM=False):
         '''Evaluate gradient with respect to parameters'''
         self.prior.init_vector(mg, 1)
         mg.zero()
@@ -399,10 +440,16 @@ class TimeDependentAdvectionDiffusion:
             dm = x[PARAMETER] - self.prior.mean
             self.prior.R.mult(dm, mg)
 
-        for t in simulation_times[1::]:
-            x[STATE].retrieve(self.solved_u.vector(), t)
-            x[ADJOINT].retrieve(self.solved_p.vector(), t)
-            mg.axpy(1., dl.assemble(self.grad_form))
+        if use_ROM:
+            for t in simulation_times[1::]:
+                self.u_tildes.retrieve(self.solved_u.vector(), t)
+                self.p_tildes.retrieve(self.solved_p.vector(), t)
+                mg.axpy(1., dl.assemble(self.grad_form))
+        else:
+            for t in simulation_times[1::]:
+                x[STATE].retrieve(self.solved_u.vector(), t)
+                x[ADJOINT].retrieve(self.solved_p.vector(), t)
+                mg.axpy(1., dl.assemble(self.grad_form))
 
         g = dl.Vector()
         self.M.init_vector(g,1)
