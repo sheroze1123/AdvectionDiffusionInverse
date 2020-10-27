@@ -265,6 +265,10 @@ class TimeDependentAdvectionDiffusion:
         self.u_tildes.initialize(self.M, 0)
         self.p_tildes = TimeDependentVector(self.simulation_times)
         self.p_tildes.initialize(self.M, 0)
+        self.L_u_tildes = TimeDependentVector(self.simulation_times)
+        self.L_u_tildes.initialize(self.M, 0)
+        self.L_p_tildes = TimeDependentVector(self.simulation_times)
+        self.L_p_tildes.initialize(self.M, 0)
         # TODO, have L_phi and M_phi here for PG projection speed-up once affine decomposition is done
 
     def set_reduced_basis(self, phi):
@@ -345,37 +349,43 @@ class TimeDependentAdvectionDiffusion:
         out.zero()
 
         # Set reduced initial condition
-        u_r = dl.Vector()
+        u_r = dl.Vector() # Coordinates of the reduced space
         self.phi.init_vector(u_r, 1) # u = Phi * u_r
         self.phi.transpmult(self.u_0.vector(), u_r)
         out.store(u_r, 0.)
 
+        # Store approximate solutions using ROMs in the original state space
         self.u_tildes.zero()
-
         # TODO : Project and unproject w/ phi
         self.u_tildes.store(self.u_0.vector(), 0.)
+        u_tilde = dl.Vector()
+        self.M.init_vector(u_tilde, 0)
 
+        self.L_u_tildes.zero()
+        L_u_tilde = dl.Vector()
+        self.M.init_vector(L_u_tilde, 0)
+
+        # Right-hand side of reduced system of equations
         rhs = dl.Vector()
         self.phi.init_vector(rhs, 1)
-
-        u = dl.Vector()
-        self.M.init_vector(u, 0)
 
         # TODO replace this with affine decomposition to avoid assembly when parameters change
         self.kappa.vector().set_local(x[PARAMETER])
         L = dl.as_backend_type(dl.assemble(self.L_varf)).mat()
-        Psi = L.matMult(self.phi.mat())
 
-        # Reduced LHS
+        Psi = L.matMult(self.phi.mat()) # Petrov-Galerkin projection
+        #  Psi = self.phi.mat() #Galerkin projection
+
+        # Left-hand size of reduced system of equations
         self.L_r = dl.PETScMatrix(Psi.transposeMatMult(Psi))
 
-        # Reduced source term
+        # Reduced source term # TODO: Could be optimized and precomputed w/ affine decomposition
         S = dl.assemble(self.S_varf)
         self.S_r = dl.Vector()
         Psi_p = dl.PETScMatrix(Psi)
         Psi_p.transpmult(S, self.S_r)
 
-        # Reduced mass matrix
+        # Reduced mass matrix #TODO: Precompute w/ affine decomposition
         M_phi = dl.as_backend_type(self.M).mat().matMult(self.phi.mat())
         self.M_r = dl.PETScMatrix(Psi.transposeMatMult(M_phi))
 
@@ -384,12 +394,10 @@ class TimeDependentAdvectionDiffusion:
             rhs.axpy(1., self.S_r)
             dl.solve(self.L_r, u_r, rhs, "cg")
             out.store(u_r, t)
-            self.phi.mult(u_r, u)
-            self.u_tildes.store(u, t)
-
-        if self.debug:
-            nb.show_solution(self.Vh[STATE], self.u_0.vector(), self.u_tildes, mytitle="Solution RB", times=np.linspace(0., 6., 6))
-            plt.show()
+            self.phi.mult(u_r, u_tilde)
+            self.u_tildes.store(u_tilde, t)
+            dl.PETScMatrix(L).mult(u_tilde, L_u_tilde)
+            self.L_u_tildes.store(L_u_tilde, t)
 
     def solveAdj(self, out, x):
         '''Solve adjoint problem backwards in time and store in out '''
@@ -426,23 +434,26 @@ class TimeDependentAdvectionDiffusion:
         reduced subpsace determined by the basis phi. Uses a Petrov-Galerkin projection'''
         out.zero()
         self.p_tildes.zero()
+        p_tilde = dl.Vector()
+        self.M.init_vector(p_tilde, 0)
+
+        self.L_p_tildes.zero()
+        L_p_tilde = dl.Vector()
+        self.M.init_vector(L_p_tilde, 0)
+        L = dl.as_backend_type(dl.assemble(self.L_varf))
 
         grad_state = TimeDependentVector(self.simulation_times)
         grad_state.initialize(self.phi, 1)
+        grad_state_snap = dl.Vector() 
+        self.phi.init_vector(grad_state_snap, 1)
         self.misfit.grad_reduced(STATE, self.u_tildes, grad_state, self.phi)
 
         # Set reduced initial condition
         p_r = dl.Vector()
-        self.phi.init_vector(p_r, 1) # u = Phi * u_r
-
-        grad_state_snap = dl.Vector()
-        self.phi.init_vector(grad_state_snap, 1)
+        self.phi.init_vector(p_r, 1) # p_tilde = Phi * p_r
 
         rhs = dl.Vector()
         self.phi.init_vector(rhs, 1)
-
-        p = dl.Vector()
-        self.M.init_vector(p, 0)
 
         L_r_t = dl.PETScMatrix(self.L_r.mat().transpose())
 
@@ -452,8 +463,10 @@ class TimeDependentAdvectionDiffusion:
             rhs.axpy(-1., grad_state_snap)
             dl.solve(L_r_t, p_r, rhs, "cg")
             out.store(p_r, t)
-            self.phi.mult(p_r, p)
-            self.p_tildes.store(p, t)
+            self.phi.mult(p_r, p_tilde)
+            self.p_tildes.store(p_tilde, t)
+            L.mult(p_tilde, L_p_tilde)
+            self.L_p_tildes.store(L_p_tilde, t)
 
     def evalGradientParameter(self, x, mg, misfit_only=False, use_ROM=False):
         '''Evaluate gradient with respect to parameters'''
@@ -464,8 +477,15 @@ class TimeDependentAdvectionDiffusion:
             self.prior.R.mult(dm, mg)
 
         if use_ROM:
+            u = dl.Vector()
+            self.M.init_vector(u, 0)
+            p = dl.Vector()
+            self.M.init_vector(p, 0)
             for t in simulation_times[1::]:
                 self.u_tildes.retrieve(self.solved_u.vector(), t)
+                self.L_p_tildes.retrieve(self.solved_p.vector(), t)
+                mg.axpy(1., dl.assemble(self.grad_form))
+                self.L_u_tildes.retrieve(self.solved_u.vector(), t)
                 self.p_tildes.retrieve(self.solved_p.vector(), t)
                 mg.axpy(1., dl.assemble(self.grad_form))
         else:
@@ -848,24 +868,43 @@ if __name__ == "__main__":
 
     ####################################################################
     # Reduced Problem Testing
-    snapshots = problem.generate_vector(STATE)
-    x_snapshots = [snapshots, true_kappa, None]
-    problem.solveFwd(x_snapshots[STATE], x_snapshots)
+    prior.mean = true_kappa
 
-    Y = np.zeros((len(simulation_times), Vh.dim()))
-    S = np.zeros((Vh.dim(), len(simulation_times) - 1))
-    ii = 0
-    print(len(utrue.data))
-    for u in snapshots.data:
-        weight = dt
-        if ii==0 or ii==(len(simulation_times)-1):
-            weight /= 2
-        Y[ii, :] = np.sqrt(weight) * u[:]
-        if ii > 0:
-            S[:, ii-1] = u[:] - u_0.vector()[:]
-        ii += 1
+    # Create reduced-space basis sampling from the prior # Replace with model-constrained adaptive sampling
+    S_full = None
+    for prior_sample in range(10):
+        noise = dl.Vector()
+        prior.init_vector(noise, "noise")
+            
+        kappa = dl.Vector()
+        prior.init_vector(kappa, 0)
+            
+        parRandom.normal(1., noise)
+        prior.sample(noise, kappa)
+        sampled_values = ksv * kappa[:]; kappa.set_local(sampled_values)
 
-    UU, SS, VV = np.linalg.svd(S)
+        snapshots = problem.generate_vector(STATE)
+        x_snapshots = [snapshots, kappa, None]
+        problem.solveFwd(x_snapshots[STATE], x_snapshots)
+
+        Y = np.zeros((len(simulation_times), Vh.dim()))
+        S = np.zeros((Vh.dim(), len(simulation_times) - 1))
+        ii = 0
+        print(len(utrue.data))
+        for u in snapshots.data:
+            weight = dt
+            if ii==0 or ii==(len(simulation_times)-1):
+                weight /= 2
+            Y[ii, :] = np.sqrt(weight) * u[:]
+            if ii > 0:
+                S[:, ii-1] = u[:] - u_0.vector()[:]
+            ii += 1
+        if S_full is None:
+            S_full = S
+        else:
+            S_full = np.column_stack((S_full, S))
+            
+    UU, SS, VV = np.linalg.svd(S_full)
 
     if debug:
         plt.semilogy(SS); plt.show()
@@ -873,22 +912,27 @@ if __name__ == "__main__":
     basis_size = np.sum(SS > pod_thresh)
     print(f"Number of singular values larger than {pod_thresh}: {basis_size}")
 
-    K = np.dot(Y, Y.T)
-    e, v = np.linalg.eig(K)
+    #  K = np.dot(Y, Y.T)
+    #  e, v = np.linalg.eig(K)
 
-    basis_size = len(simulation_times)
-    U = np.zeros((basis_size, Vh.dim()))
-    for i in range(basis_size):
-        e_i = v[:,i].real
-        U[i,:] = np.sum(np.dot(np.diag(e_i), Y),0)
-    basis = U.T
+    #  U = np.zeros((basis_size, Vh.dim()))
+    #  for i in range(basis_size):
+        #  e_i = v[:,i].real
+        #  U[i,:] = np.sum(np.dot(np.diag(e_i), Y),0)
+    #  basis = U.T
     basis = UU[:, :basis_size]
+    print(f"Dimension of reduced basis: {basis.shape[1]}")
+
     problem.set_reduced_basis(basis)
 
     utrue_r = problem.generate_vector("REDUCED_STATE")
     ptrue_r = problem.generate_vector("REDUCED_STATE")
     x = [utrue_r, true_kappa, ptrue_r]
     problem.solveReducedFwd(x[STATE], x)
+    if debug:
+        nb.show_solution(Vh, u_0.vector(), problem.u_tildes, mytitle="Solution RB", \
+                times=np.linspace(t_init, t_final, 6))
+        plt.show()
     problem.solveReducedAdj(x[ADJOINT], x)
     mg = problem.generate_vector(PARAMETER)
     grad_norm_r = problem.evalGradientParameter(x, mg, use_ROM=True)
@@ -907,11 +951,11 @@ if __name__ == "__main__":
         cx = problem.cost(x)
         
         grad_x = problem.generate_vector(PARAMETER)
-        problem.evalGradientParameter(x, grad_x, misfit_only=False, use_ROM=False)
+        problem.evalGradientParameter(x, grad_x, misfit_only=False, use_ROM=True)
         grad_xh = grad_x.inner( h )
         
-        n_eps = 32
-        eps = np.power(.5, np.arange(1., n_eps+1))
+        n_eps = 24
+        eps = np.power(.5, np.arange(2, n_eps+2))
         err_grad = np.zeros(n_eps)
         
         for i in range(n_eps):
@@ -933,6 +977,57 @@ if __name__ == "__main__":
         plt.loglog(eps, err_grad, "-ob", eps, eps*(err_grad[0]/eps[0]), "-.k")
         plt.title("FD Gradient Check for Reduced Model")
         plt.show()
+
+    def reduced_cost_function(parameter_value):
+        '''Cost function for reduced problem in numpy'''
+        u_r = problem.generate_vector("REDUCED_STATE")
+        p_r = problem.generate_vector("REDUCED_STATE")
+        k = problem.generate_vector(PARAMETER)
+        k.set_local(parameter_value)
+        x_r = [u_r, k, p_r]
+        problem.solveReducedFwd(x_r[STATE], x_r)
+        problem.solveReducedAdj(x_r[ADJOINT], x_r)
+        x = [problem.u_tildes, k, problem.p_tildes]
+        return problem.cost(x)[0]
+
+    def reduced_gradient(parameter_value):
+        '''Gradient of the cost function for the reduced problem in numpy'''
+        u_r = problem.generate_vector("REDUCED_STATE")
+        p_r = problem.generate_vector("REDUCED_STATE")
+        k = problem.generate_vector(PARAMETER)
+        k.set_local(parameter_value)
+        x_r = [u_r, k, p_r]
+        problem.solveReducedFwd(x_r[STATE], x_r)
+        problem.solveReducedAdj(x_r[ADJOINT], x_r)
+        grad_x = problem.generate_vector(PARAMETER)
+        problem.evalGradientParameter(x_r, grad_x, misfit_only=False, use_ROM=True)
+        return grad_x[:]
+
+    #  starting_parameter_values = prior.mean[:]
+    starting_parameter_values = dl.interpolate(dl.Constant(0.003/ksv), Vh).vector()[:]
+    print(f'Starting cost: {reduced_cost_function(starting_parameter_values)}')
+    bounds = Bounds(0.001, 0.006)
+    res = minimize(reduced_cost_function, starting_parameter_values, 
+            method='L-BFGS-B', 
+            jac=reduced_gradient,
+            bounds=bounds,
+            options={'ftol':1e-8, 'gtol':1e-8, 'maxls':20, 'iprint':11})
+    print(f'\nstatus: {res.success}, message: {res.message}, n_it: {res.nit}')
+    print(f'Minimum cost: {res.fun:.3F}')
+
+    # TODO: Compute relative reconstruction error here
+    
+    reconstruction_ROM = problem.generate_vector(PARAMETER)
+    reconstruction_ROM.set_local(res.x)
+
+    true_kappa_f = dl.Function(Vh)
+    true_kappa_f.vector().set_local(true_kappa)
+    m_f = dl.Function(Vh)
+    m_f.vector().set_local(reconstruction_ROM)
+
+    print(f"Relative reconstruction error with ROM forward: {dl.norm(reconstruction_ROM - true_kappa)/dl.norm(true_kappa)}")
+    nb.multi1_plot([true_kappa_f, m_f], ["True diffusion", "Solution ROM"], vmax=1.05*np.max(true_kappa[:]), vmin=0.95*np.min(true_kappa[:]))
+    plt.show()
     ####################################################################
 
     if rank == 0:
