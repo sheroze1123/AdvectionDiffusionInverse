@@ -188,7 +188,7 @@ class TimeDependentAdvectionDiffusion:
                 s_x = bottom_left_x + s_interval * i
                 s_y = bottom_left_y + s_interval * j
 
-                source_point = dl.Expression('min(0.5, exp(-s * (pow(x[0] - s_x, 2) + pow(x[1] - s_y, 2))))', \
+                source_point = dl.Expression('min(0.5, exp(-s*(pow(x[0]-s_x, 2) + pow(x[1]-s_y, 2))))', \
                         element=Vh[STATE].ufl_element(), s=s_decay, s_x=s_x, s_y=s_y)
                 if source is None:
                     source = source_point
@@ -271,6 +271,12 @@ class TimeDependentAdvectionDiffusion:
         self.L_p_tildes.initialize(self.M, 0)
         # TODO, have L_phi and M_phi here for PG projection speed-up once affine decomposition is done
 
+        # Setup required abjects for a posteriori error estimation
+        self.approximate_residuals = TimeDependentVector(self.simulation_times)
+        self.approximate_residuals.initialize(self.M, 0)
+        self.true_qoi_errors = np.zeros((len(self.simulation_times), len(self.misfit.ntargets)))
+        self.qoi_bounds = np.zeros((len(self.simulation_times),))
+
     def set_reduced_basis(self, phi):
         dofs, n_basis = phi.shape
         self.phi = dl.PETScMatrix(PETSc.Mat().createDense([dofs, n_basis], array=phi))
@@ -301,6 +307,14 @@ class TimeDependentAdvectionDiffusion:
             u_r = TimeDependentVector(self.simulation_times)
             u_r.initialize(self.phi, 1)
             return u_r
+        elif component == "REDUCED":
+            u_r = TimeDependentVector(self.simulation_times)
+            u_r.initialize(self.phi, 1)
+            m = dl.Vector()
+            self.prior.init_vector(m, 0)
+            p_r = TimeDependentVector(self.simulation_times)
+            p_r.initialize(self.phi, 1)
+            return [u_r, m, p_r]
         else:
             raise
 
@@ -389,7 +403,16 @@ class TimeDependentAdvectionDiffusion:
         M_phi = dl.as_backend_type(self.M).mat().matMult(self.phi.mat())
         self.M_r = dl.PETScMatrix(Psi.transposeMatMult(M_phi))
 
-        for t in self.simulation_times[1::]:
+
+        # Dual-weighted residual stuff
+        M_u_tilde_prev = dl.Vector()
+        self.M.init_vector(M_u_tilde_prev, 0)
+        B_phi = np.dot(self.misfit.B.array(), self.phi.mat().getDenseArray())
+        #  lam = np.linalg.solve(self.L_r.array().T, -B_phi.T) #TODO: incorrect lambda
+
+
+        for t_idx, t in enumerate(self.simulation_times[1::]):
+            self.M.mult(u_tilde, M_u_tilde_prev)
             self.M_r.mult(u_r, rhs)
             rhs.axpy(1., self.S_r)
             dl.solve(self.L_r, u_r, rhs, "cg")
@@ -398,6 +421,13 @@ class TimeDependentAdvectionDiffusion:
             self.u_tildes.store(u_tilde, t)
             dl.PETScMatrix(L).mult(u_tilde, L_u_tilde)
             self.L_u_tildes.store(L_u_tilde, t)
+            residual_fom = L_u_tilde - S - M_u_tilde_prev
+            self.approximate_residuals.store(residual_fom, t)
+            u = dl.Vector()
+            self.M.init_vector(u, 0)
+            self.u_s.retrieve(u, t)
+            true_e = np.dot(self.misfit.B.array(), u[:]) - np.dot(self.misfit.B.array(), u_tilde[:])
+            self.true_qoi_errors[t_idx+1, :] = true_e
 
     def solveAdj(self, out, x):
         '''Solve adjoint problem backwards in time and store in out '''
@@ -419,8 +449,45 @@ class TimeDependentAdvectionDiffusion:
         grad_state_snap = dl.Vector()
         self.M.init_vector(grad_state_snap, 0)
 
-        for t in self.simulation_times[::-1]:
+        residual_w_reduced = dl.Vector()
+        self.M.init_vector(residual_w_reduced, 0)
+        print(f"Max kappa: {np.max(self.kappa.vector()[:])}, min kappa: {np.min(self.kappa.vector()[:])}")
+
+
+        for t_idx, t in enumerate(self.simulation_times[::-1]):
             Lt, rhs = dl.assemble_system(self.Lt_varf, self.Lt_rhs_varf)
+
+            # Dual-weighted residual computation
+            if t > 0:
+                lam = np.linalg.solve(Lt.array(), -self.misfit.B.array().T)
+                self.approximate_residuals.retrieve(residual_w_reduced, t)
+                bound = np.linalg.norm(np.dot(residual_w_reduced[:], lam), 1)
+                abs_qoi_error = np.abs(self.true_qoi_errors[-(1+t_idx), :])
+                per_qoi_error_bound = np.linalg.norm(np.multiply(lam.T, residual_w_reduced[:]), axis=1, ord=1)
+
+                #  within_bound = np.all(abs_qoi_error < per_qoi_error_bound)
+                #  if not within_bound:
+                    #  print("qoi-wise bound error")
+                #  tightness = np.mean((per_qoi_error_bound - abs_qoi_error)/per_qoi_error_bound)
+                #  print(f"Qoi-wise tightness: {tightness}")
+
+                within_bound = np.all(abs_qoi_error < bound)
+                tightness = np.mean(bound - abs_qoi_error)/bound
+                if not within_bound:
+                    print("Invalid bound")
+                    return False
+                    #  violated_idxs = abs_qoi_error < bound
+                    #  plt.plot(problem.misfit.ntargets[violated_idxs, 0], problem.misfit.ntargets[violated_idxs, 1], 'o')
+                    #  problem.u_s.retrieve(problem.solved_u.vector(), t)
+                    #  nb.plot(problem.solved_u); plt.show()
+                    #  import pdb; pdb.set_trace()
+                    #  nb.show_solution(self.Vh[STATE], self.u_0.vector(), self.u_s, mytitle="Solution", times=np.linspace(0.0, 6.0, 6)); plt.show()
+                    
+                #  print(f"Bound: {bound}, time: {t}, t_idx: {t_idx}")
+                #  print(f"Mean tightness: {tightness}")
+                #  assert within_bound, "Bound invalid"
+                self.qoi_bounds[-(1+t_idx)] = bound
+
             grad_state.retrieve(grad_state_snap, t)
             rhs.axpy(-0.1, grad_state_snap)
 
@@ -428,6 +495,8 @@ class TimeDependentAdvectionDiffusion:
             self.p_old.vector().set_local(p)
             out.store(p, t)
             self.p_s.store(p, t) #TODO Fix duplicate storage
+
+        return True
 
     def solveReducedAdj(self, out, x):
         '''Perform implicit time-stepping and solve the adjoint problem in the 
@@ -742,7 +811,7 @@ if __name__ == "__main__":
     sep = "\n"+"#"*80+"\n"
 
     # Discretization parameters
-    N_size = 32
+    N_size = 40
 
     # Define domain
     geometry = Rectangle(dl.Point(0.0, 0.0), dl.Point(L, W)) 
@@ -752,10 +821,11 @@ if __name__ == "__main__":
     rank = dl.MPI.rank(mesh.mpi_comm())
     nproc = dl.MPI.size(mesh.mpi_comm())
 
-    velocity = computeVelocityField(mesh, debug)
 
     # Function space for state, adjoint, and parameter variables are chosen to be the same
     Vh = dl.FunctionSpace(mesh, "Lagrange", 1)
+
+    velocity = computeVelocityField(mesh, debug)
 
     if rank == 0:
         print(sep, "Set up the mesh and finite element spaces.\n",
@@ -795,7 +865,7 @@ if __name__ == "__main__":
     prior.sample(noise, true_kappa)
     sampled_values = ksv * true_kappa[:]; true_kappa.set_local(sampled_values)
 
-    prior.mean = dl.interpolate(dl.Constant(0.005/ksv), Vh).vector()
+    prior.mean = dl.interpolate(dl.Constant(0.004/ksv), Vh).vector()
 
     # Visualize draws from the prior for debugging purposes
     if debug:
@@ -868,6 +938,9 @@ if __name__ == "__main__":
 
     ####################################################################
     # Reduced Problem Testing
+
+    # TODO: Use a different prior mean
+    prior_mean = prior.mean
     prior.mean = true_kappa
 
     # Create reduced-space basis sampling from the prior # Replace with model-constrained adaptive sampling
@@ -890,7 +963,6 @@ if __name__ == "__main__":
         Y = np.zeros((len(simulation_times), Vh.dim()))
         S = np.zeros((Vh.dim(), len(simulation_times) - 1))
         ii = 0
-        print(len(utrue.data))
         for u in snapshots.data:
             weight = dt
             if ii==0 or ii==(len(simulation_times)-1):
@@ -924,6 +996,20 @@ if __name__ == "__main__":
     print(f"Dimension of reduced basis: {basis.shape[1]}")
 
     problem.set_reduced_basis(basis)
+    prior.mean = prior_mean
+
+    def solve_reduced_w_error_estimate(kappa):
+        u_s = problem.generate_vector(STATE)
+        p_s = problem.generate_vector(ADJOINT)
+        u_FOM = [u_s, kappa, p_s]
+        problem.solveFwd(u_FOM[STATE], u_FOM)
+
+        utrue_r = problem.generate_vector("REDUCED_STATE")
+        x = [utrue_r, kappa, None]
+        problem.solveReducedFwd(x[STATE], x)
+        problem.solveAdj(u_FOM[ADJOINT], u_FOM) # Computes full adjoint and estimates bound on error
+
+    solve_reduced_w_error_estimate(true_kappa)
 
     utrue_r = problem.generate_vector("REDUCED_STATE")
     ptrue_r = problem.generate_vector("REDUCED_STATE")
@@ -1004,37 +1090,128 @@ if __name__ == "__main__":
         return grad_x[:]
 
     #  starting_parameter_values = prior.mean[:]
-    starting_parameter_values = dl.interpolate(dl.Constant(0.003/ksv), Vh).vector()[:]
-    print(f'Starting cost: {reduced_cost_function(starting_parameter_values)}')
-    bounds = Bounds(0.001, 0.006)
-    res = minimize(reduced_cost_function, starting_parameter_values, 
-            method='L-BFGS-B', 
-            jac=reduced_gradient,
-            bounds=bounds,
-            options={'ftol':1e-8, 'gtol':1e-8, 'maxls':20, 'iprint':11})
-    print(f'\nstatus: {res.success}, message: {res.message}, n_it: {res.nit}')
-    print(f'Minimum cost: {res.fun:.3F}')
+    #  starting_parameter_values = dl.interpolate(dl.Constant(0.003/ksv), Vh).vector()[:]
+    #  print(f'Starting cost: {reduced_cost_function(starting_parameter_values)}')
+    #  bounds = Bounds(0.001, 0.006)
+    #  res = minimize(reduced_cost_function, starting_parameter_values, 
+            #  method='L-BFGS-B', 
+            #  jac=reduced_gradient,
+            #  bounds=bounds,
+            #  options={'ftol':1e-8, 'gtol':1e-8, 'maxls':20, 'iprint':11})
+    #  print(f'\nstatus: {res.success}, message: {res.message}, n_it: {res.nit}')
+    #  print(f'Minimum cost: {res.fun:.3F}')
 
-    # TODO: Compute relative reconstruction error here
-    
-    reconstruction_ROM = problem.generate_vector(PARAMETER)
-    reconstruction_ROM.set_local(res.x)
+    #  reconstruction_ROM = problem.generate_vector(PARAMETER)
+    #  reconstruction_ROM.set_local(res.x)
+    #  print(f"Relative reconstruction error with ROM forward: {dl.norm(reconstruction_ROM - true_kappa)/dl.norm(true_kappa)}")
 
     true_kappa_f = dl.Function(Vh)
-    true_kappa_f.vector().set_local(true_kappa)
-    m_f = dl.Function(Vh)
-    m_f.vector().set_local(reconstruction_ROM)
+    #  true_kappa_f.vector().set_local(true_kappa)
+    #  m_f = dl.Function(Vh)
+    #  m_f.vector().set_local(reconstruction_ROM)
 
-    print(f"Relative reconstruction error with ROM forward: {dl.norm(reconstruction_ROM - true_kappa)/dl.norm(true_kappa)}")
-    nb.multi1_plot([true_kappa_f, m_f], ["True diffusion", "Solution ROM"], vmax=1.05*np.max(true_kappa[:]), vmin=0.95*np.min(true_kappa[:]))
-    plt.show()
+    #  nb.multi1_plot([true_kappa_f, m_f], ["True diffusion", "Solution ROM"], vmax=1.05*np.max(true_kappa[:]), vmin=0.95*np.min(true_kappa[:]))
+    #  plt.show()
+    ####################################################################
+    # Learnt corrective term 
+    create_dataset = True
+
+    if create_dataset:
+        prior_mean = prior.mean
+        dataset_size = 10000
+        parameter_values = np.zeros((dataset_size, Vh.dim()))
+        state_values = np.zeros((dataset_size, len(simulation_times), Vh.dim()))
+        qoi_values = np.zeros((dataset_size, len(observation_times), targets.shape[0]))
+        reduced_state_values = np.zeros((dataset_size, len(simulation_times), basis_size))
+        reduced_qoi_values = np.zeros((dataset_size, len(observation_times), targets.shape[0]))
+        qoi_bounds = np.zeros((dataset_size, len(observation_times)))
+
+        print(f"Size of state samples in mb: {round(state_values.nbytes/(1024 * 1024))}")
+
+        sampling_idx = 0
+
+        while sampling_idx < dataset_size:
+            print(f"Sampling index: {sampling_idx} out of {dataset_size}")
+            noise = dl.Vector()
+            prior.init_vector(noise, "noise")
+                
+            kappa = dl.Vector()
+            prior.init_vector(kappa, 0)
+                
+            #TODO: Change prior mean
+            while True:
+                parRandom.normal(1., noise)
+                mean_val = np.exp(np.random.uniform(np.log(1e-3), np.log(1e-2)))
+                prior.mean = dl.interpolate(dl.Constant(mean_val), Vh).vector()
+                prior.sample(noise, kappa)
+                sampled_values = ksv * kappa[:]; kappa.set_local(sampled_values)
+                if np.min(sampled_values) > 1e-4:
+                    break
+
+            true_kappa_f.vector().set_local(kappa)
+            #  nb.plot(true_kappa_f); plt.show()
+
+            snapshots = problem.generate_vector(STATE)
+            adj_snapshots = problem.generate_vector(ADJOINT)
+            x_snapshots = [snapshots, kappa, adj_snapshots]
+            problem.solveFwd(x_snapshots[STATE], x_snapshots)
+
+            parameter_values[sampling_idx, :] = kappa[:]
+
+            for time_idx, state in enumerate(x_snapshots[STATE].data):
+                state_values[sampling_idx, time_idx, :] = state[:] 
+
+            misfit.observe(x_snapshots, misfit.data)
+
+            for time_idx, observation in enumerate(misfit.data.data):
+                qoi_values[sampling_idx, time_idx, :] = observation[:]
+
+            r_snapshots = problem.generate_vector("REDUCED_STATE")
+            x_r_snapshots = [r_snapshots, kappa, None]
+            problem.solveReducedFwd(x_r_snapshots[STATE], x_r_snapshots)
+
+            for time_idx, state in enumerate(x_r_snapshots[STATE].data):
+                reduced_state_values[sampling_idx, time_idx, :] = state[:] 
+
+            x = [problem.u_tildes, kappa, None]
+            misfit.observe(x, misfit.data)
+
+            for time_idx, observation in enumerate(misfit.data.data):
+                reduced_qoi_values[sampling_idx, time_idx, :] = observation[:]
+
+            is_bound_valid = problem.solveAdj(x_snapshots[ADJOINT], x_snapshots)
+
+            if not is_bound_valid:
+                # Erroneous solution, retry
+                continue
+            qoi_bounds[sampling_idx, :] = problem.qoi_bounds[-len(observation_times):]
+            sampling_idx += 1
+
+        np.save('parameter_samples.npy', parameter_values)
+        np.save('state_samples.npy', state_values)
+        np.save('qoi_samples.npy', qoi_values)
+        np.save('reduced_basis.npy', basis)
+        np.save('reduced_state_samples.npy', reduced_state_values)
+        np.save('reduced_qoi_samples.npy', reduced_qoi_values)
+        np.save('qoi_bounds.npy', qoi_bounds)
+
+        del parameter_values
+        del state_values
+        del qoi_values
+        del reduced_state_values
+        del reduced_qoi_values
+        del qoi_bounds
+
+        prior.mean = prior_mean
+
     ####################################################################
 
-    if rank == 0:
-        print(sep, "Test the gradient and the Hessian of the model", sep)
-    m0 = true_kappa.copy()
 
     if debug:
+        if rank == 0:
+            print(sep, "Test the gradient and the Hessian of the model", sep)
+        m0 = true_kappa.copy()
+
         # Use hippylib to perform the gradient and Hessian check
         n_eps = 24
         eps_begin_idx = np.ceil(np.log(0.001/ksv)/np.log(0.5)) # hippylib finite differencing isn't smart
@@ -1168,18 +1345,3 @@ if __name__ == "__main__":
     m_f.vector().set_local(m)
     nb.multi1_plot([true_kappa_f, m_f], ["True diffusion", "Solution"], vmax=1.05*np.max(true_kappa[:]), vmin=0.95*np.min(true_kappa[:]))
     plt.show()
-
-
-    bounds = Bounds(1e-5, 1.05)
-    print(f"Optimization bounds: {0.95*vmin}, {1.05*vmax}")
-    #  bounds = Bounds(0.3, 0.7)
-    res = minimize(solver_FOM.cost_function, z_0_nodal_vals, 
-            method='L-BFGS-B', 
-            jac=solver_FOM.gradient,
-            bounds=bounds,
-            options={'ftol':1e-10, 'gtol':1e-8})
-
-    print(f'\nstatus: {res.success}, message: {res.message}, n_it: {res.nit}')
-    print(f'Minimum cost: {res.fun:.3F}')
-    print(f'Running time (fwd FOM): {solver_FOM.fwd_time} seconds')
-    print(f'Running time (grad FOM): {solver_FOM.grad_time} seconds')
