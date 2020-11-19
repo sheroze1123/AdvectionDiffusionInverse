@@ -39,7 +39,8 @@ def res_bn_fc_model(activation, optimizer, lr, n_layers, n_weights, input_shape,
         out = residual_unit(out, activation, n_weights)
     out = BatchNormalization()(out)
     out = activation(out)
-    out = Dense(output_shape)(out)
+    out = Dense(output_shape, activation='tanh')(out)
+    out = Multiply()([out, bound_input])
     model = Model(inputs=inputs, outputs=out)
     model.compile(loss='mse', optimizer=optimizer(lr=lr), metrics=['mape'])
     return model
@@ -64,7 +65,7 @@ qoi_values           = np.load('qoi_samples.npy')
 reduced_basis        = np.load('reduced_basis.npy')        
 reduced_state_values = np.load('reduced_state_samples.npy')
 reduced_qoi_values   = np.load('reduced_qoi_samples.npy')
-qoi_bounds = np.load('qoi_bounds.npy')
+qoi_bounds = np.abs(np.load('qoi_bounds.npy'))
 qoi_errors = qoi_values - reduced_qoi_values
 
 mean_parameter_value = np.mean(parameter_values)

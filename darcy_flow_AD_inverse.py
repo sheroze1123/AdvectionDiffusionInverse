@@ -1,6 +1,6 @@
 from hippylib import *
 from mshr import *
-import dolfin as dl
+import dolfin as dl; dl.set_log_level(40)
 import ufl
 import numpy as np
 import matplotlib.pyplot as plt
