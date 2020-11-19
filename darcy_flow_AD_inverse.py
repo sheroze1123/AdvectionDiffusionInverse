@@ -163,6 +163,7 @@ class TimeDependentAdvectionDiffusion:
         self.simulation_times = simulation_times
         self.observation_times = observation_times
         self.dt = simulation_times[1] - simulation_times[0]
+        self.B_T = self.misfit.B.array().T 
 
         # Trial and Test functions for the weak forms
         u_trial = dl.TrialFunction(Vh[STATE])
@@ -464,11 +465,9 @@ class TimeDependentAdvectionDiffusion:
         num_sim_times = len(self.simulation_times)
         lam = np.zeros((num_sim_times, self.ndofs, num_targets))
         L_T = dl.assemble(self.Lt_varf).array()
-        dt_B_T = self.misfit.B.array().T
         M_T = self.Mt_stab.array()
-        #  accumulated_bounds = np.zeros((num_obs_times, num_targets))
         self.qoi_bounds[:] = 0
-        lam_old = np.linalg.solve(L_T, dt_B_T)
+        lam_old = np.linalg.solve(L_T, self.B_T)
         lam[-1, :, :] = lam_old
 
         for t_idx, t in enumerate(self.simulation_times[::-1]):
@@ -499,16 +498,7 @@ class TimeDependentAdvectionDiffusion:
             out.store(p, t)
             self.p_s.store(p, t) #TODO Fix duplicate storage
 
-        #  for obs_t in self.observation_times:
-            #  obs_idx = np.searchsorted(self.observation_times, obs_t)
-            #  sim_idx = np.searchsorted(self.simulation_times, obs_t)
-            #  plt.plot(accumulated_bounds[obs_idx]); 
-            #  plt.plot(self.true_qoi_errors[sim_idx], 'o'); 
-            #  plt.title(f"Observation time: {obs_t}")
-            #  plt.show()
-
         assert np.allclose(self.true_qoi_errors, self.qoi_bounds), "Invalid bounds"
-        #  self.qoi_bounds = accumulated_bounds
         return True
 
     def solveReducedAdj(self, out, x):
