@@ -134,7 +134,8 @@ class SpaceTimePointwiseStateObservation(Misfit):
 
 
 class TimeDependentAdvectionDiffusion:
-    def __init__(self, mesh, Vh, prior, misfit, simulation_times, velocity, u_0, gls_stab=False, debug=False):
+    def __init__(self, mesh, Vh, prior, misfit, simulation_times, velocity, u_0, \
+            observation_times, gls_stab=False, debug=False):
         '''Initialize a time-dependent advection diffusion problem
 
         Inputs:
@@ -153,13 +154,15 @@ class TimeDependentAdvectionDiffusion:
         # Set member variables describing the problem
         self.mesh = mesh
         self.Vh = Vh
+        self.ndofs = Vh[STATE].dim()
         self.prior = prior
         self.misfit = misfit
         self.u_0 = u_0
 
         # Assume constant timestepping
         self.simulation_times = simulation_times
-        dt = simulation_times[1] - simulation_times[0]
+        self.observation_times = observation_times
+        self.dt = simulation_times[1] - simulation_times[0]
 
         # Trial and Test functions for the weak forms
         u_trial = dl.TrialFunction(Vh[STATE])
@@ -173,7 +176,7 @@ class TimeDependentAdvectionDiffusion:
         self.kappa = dl.Function(Vh[PARAMETER])
         kappa_scaling = dl.Constant(ksv) # Used to make the problem less diffusive without having negative values
 
-        dt_expr = dl.Constant(dt)
+        dt_expr = dl.Constant(self.dt)
 
         # Describe sources TODO Make this programmatic
         N_source_grid_size = 4
@@ -274,8 +277,8 @@ class TimeDependentAdvectionDiffusion:
         # Setup required abjects for a posteriori error estimation
         self.approximate_residuals = TimeDependentVector(self.simulation_times)
         self.approximate_residuals.initialize(self.M, 0)
-        self.true_qoi_errors = np.zeros((len(self.simulation_times), len(self.misfit.ntargets)))
-        self.qoi_bounds = np.zeros((len(self.simulation_times),))
+        self.true_qoi_errors = np.zeros((len(self.observation_times), len(self.misfit.ntargets)))
+        self.qoi_bounds = np.zeros((len(self.observation_times), len(self.misfit.ntargets)))
 
     def set_reduced_basis(self, phi):
         dofs, n_basis = phi.shape
@@ -423,11 +426,14 @@ class TimeDependentAdvectionDiffusion:
             self.L_u_tildes.store(L_u_tilde, t)
             residual_fom = L_u_tilde - S - M_u_tilde_prev
             self.approximate_residuals.store(residual_fom, t)
-            u = dl.Vector()
-            self.M.init_vector(u, 0)
-            self.u_s.retrieve(u, t)
-            true_e = np.dot(self.misfit.B.array(), u[:]) - np.dot(self.misfit.B.array(), u_tilde[:])
-            self.true_qoi_errors[t_idx+1, :] = true_e
+
+            if t in self.observation_times:
+                obs_idx = np.searchsorted(self.observation_times, t)
+                u = dl.Vector()
+                self.M.init_vector(u, 0)
+                self.u_s.retrieve(u, t)
+                true_e = np.dot(self.misfit.B.array(), u[:]) - np.dot(self.misfit.B.array(), u_tilde[:])
+                self.true_qoi_errors[obs_idx, :] = true_e
 
     def solveAdj(self, out, x):
         '''Solve adjoint problem backwards in time and store in out '''
@@ -453,40 +459,37 @@ class TimeDependentAdvectionDiffusion:
         self.M.init_vector(residual_w_reduced, 0)
         print(f"Max kappa: {np.max(self.kappa.vector()[:])}, min kappa: {np.min(self.kappa.vector()[:])}")
 
+        num_targets = len(self.misfit.ntargets)
+        num_obs_times = len(self.observation_times)
+        num_sim_times = len(self.simulation_times)
+        lam = np.zeros((num_sim_times, self.ndofs, num_targets))
+        L_T = dl.assemble(self.Lt_varf).array()
+        dt_B_T = self.misfit.B.array().T
+        M_T = self.Mt_stab.array()
+        #  accumulated_bounds = np.zeros((num_obs_times, num_targets))
+        self.qoi_bounds[:] = 0
+        lam_old = np.linalg.solve(L_T, dt_B_T)
+        lam[-1, :, :] = lam_old
 
         for t_idx, t in enumerate(self.simulation_times[::-1]):
             Lt, rhs = dl.assemble_system(self.Lt_varf, self.Lt_rhs_varf)
 
+            #####################################################################
             # Dual-weighted residual computation
-            if t > 0:
-                lam = np.linalg.solve(Lt.array(), -self.misfit.B.array().T)
-                self.approximate_residuals.retrieve(residual_w_reduced, t)
-                bound = np.linalg.norm(np.dot(residual_w_reduced[:], lam), 1)
-                abs_qoi_error = np.abs(self.true_qoi_errors[-(1+t_idx), :])
-                per_qoi_error_bound = np.linalg.norm(np.multiply(lam.T, residual_w_reduced[:]), axis=1, ord=1)
+            # TODO: Solve adjoint in a reduced space
+            self.approximate_residuals.retrieve(residual_w_reduced, t)
 
-                #  within_bound = np.all(abs_qoi_error < per_qoi_error_bound)
-                #  if not within_bound:
-                    #  print("qoi-wise bound error")
-                #  tightness = np.mean((per_qoi_error_bound - abs_qoi_error)/per_qoi_error_bound)
-                #  print(f"Qoi-wise tightness: {tightness}")
+            obs_idx = np.searchsorted(self.observation_times, t)
+            if t_idx > 0:
+                lam_old = np.linalg.solve(L_T, np.dot(M_T, lam_old))
+                lam[-(1+t_idx), :, :] = lam_old
 
-                within_bound = np.all(abs_qoi_error < bound)
-                tightness = np.mean(bound - abs_qoi_error)/bound
-                if not within_bound:
-                    print("Invalid bound")
-                    return False
-                    #  violated_idxs = abs_qoi_error < bound
-                    #  plt.plot(problem.misfit.ntargets[violated_idxs, 0], problem.misfit.ntargets[violated_idxs, 1], 'o')
-                    #  problem.u_s.retrieve(problem.solved_u.vector(), t)
-                    #  nb.plot(problem.solved_u); plt.show()
-                    #  import pdb; pdb.set_trace()
-                    #  nb.show_solution(self.Vh[STATE], self.u_0.vector(), self.u_s, mytitle="Solution", times=np.linspace(0.0, 6.0, 6)); plt.show()
-                    
-                #  print(f"Bound: {bound}, time: {t}, t_idx: {t_idx}")
-                #  print(f"Mean tightness: {tightness}")
-                #  assert within_bound, "Bound invalid"
-                self.qoi_bounds[-(1+t_idx)] = bound
+            for j in range(obs_idx, num_obs_times):
+                observation_time = self.observation_times[j]
+                timesteps_since_observation = int(np.rint((observation_time - t)/self.dt))
+                lam_idx = -(1 + timesteps_since_observation)
+                self.qoi_bounds[j, :] += np.dot(-lam[lam_idx, :, :].T, residual_w_reduced[:])
+            #####################################################################
 
             grad_state.retrieve(grad_state_snap, t)
             rhs.axpy(-0.1, grad_state_snap)
@@ -496,6 +499,16 @@ class TimeDependentAdvectionDiffusion:
             out.store(p, t)
             self.p_s.store(p, t) #TODO Fix duplicate storage
 
+        #  for obs_t in self.observation_times:
+            #  obs_idx = np.searchsorted(self.observation_times, obs_t)
+            #  sim_idx = np.searchsorted(self.simulation_times, obs_t)
+            #  plt.plot(accumulated_bounds[obs_idx]); 
+            #  plt.plot(self.true_qoi_errors[sim_idx], 'o'); 
+            #  plt.title(f"Observation time: {obs_t}")
+            #  plt.show()
+
+        assert np.allclose(self.true_qoi_errors, self.qoi_bounds), "Invalid bounds"
+        #  self.qoi_bounds = accumulated_bounds
         return True
 
     def solveReducedAdj(self, out, x):
@@ -899,7 +912,8 @@ if __name__ == "__main__":
     observation_dt = .2
 
     simulation_times = np.arange(t_init, t_final+.5*dt, dt)
-    observation_times = np.arange(t_1, t_final+.5*dt, observation_dt)
+    #  observation_times = np.arange(t_1, t_final+.5*dt, observation_dt)
+    observation_times = simulation_times[round(t_1/dt)::round(observation_dt/dt)]
 
     # Define observation targets. Chosen randomly on the domain
     targets = np.random.uniform([0.0, 0.0], [L, W], (200, 2))
@@ -910,7 +924,7 @@ if __name__ == "__main__":
     misfit = SpaceTimePointwiseStateObservation(Vh, observation_times, targets)
 
     problem = TimeDependentAdvectionDiffusion(
-        mesh, [Vh, Vh, Vh], prior, misfit, simulation_times, velocity, u_0, False, debug)
+        mesh, [Vh, Vh, Vh], prior, misfit, simulation_times, velocity, u_0, observation_times, False, debug)
     #  problem.left_inflow.apply(u_0.vector())
 
     if rank == 0:
@@ -1124,7 +1138,7 @@ if __name__ == "__main__":
         qoi_values = np.zeros((dataset_size, len(observation_times), targets.shape[0]))
         reduced_state_values = np.zeros((dataset_size, len(simulation_times), basis_size))
         reduced_qoi_values = np.zeros((dataset_size, len(observation_times), targets.shape[0]))
-        qoi_bounds = np.zeros((dataset_size, len(observation_times)))
+        qoi_bounds = np.zeros((dataset_size, len(observation_times), targets.shape[0]))
 
         print(f"Size of state samples in mb: {round(state_values.nbytes/(1024 * 1024))}")
 
@@ -1184,7 +1198,7 @@ if __name__ == "__main__":
             if not is_bound_valid:
                 # Erroneous solution, retry
                 continue
-            qoi_bounds[sampling_idx, :] = problem.qoi_bounds[-len(observation_times):]
+            qoi_bounds[sampling_idx, :, :] = problem.qoi_bounds[:, :]
             sampling_idx += 1
 
         np.save('parameter_samples.npy', parameter_values)
