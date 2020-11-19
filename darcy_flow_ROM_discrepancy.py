@@ -1,6 +1,6 @@
 import sys; sys.path.append('../')
 import numpy as np
-import matplotlib; matplotlib.use('macosx')
+import matplotlib; matplotlib.use('agg')
 import matplotlib.pyplot as plt
 import os
 import warnings
@@ -31,6 +31,7 @@ def residual_unit(x, activation, n_weights, l1_reg=1e-8, l2_reg=1e-4):
 
 def res_bn_fc_model(activation, optimizer, lr, n_layers, n_weights, input_shape, output_shape):
     inputs = Input(shape=(input_shape,))
+    bound_input = Input(shape=(output_shape,))
     y = Dense(n_weights, input_shape=(input_shape,), activation=None, 
             kernel_regularizer=l1_l2(1e-4, 1e-4))(inputs)
     out = residual_unit(y, activation, n_weights)
@@ -63,6 +64,7 @@ qoi_values           = np.load('qoi_samples.npy')
 reduced_basis        = np.load('reduced_basis.npy')        
 reduced_state_values = np.load('reduced_state_samples.npy')
 reduced_qoi_values   = np.load('reduced_qoi_samples.npy')
+qoi_bounds = np.load('qoi_bounds.npy')
 qoi_errors = qoi_values - reduced_qoi_values
 
 mean_parameter_value = np.mean(parameter_values)
@@ -116,11 +118,11 @@ plt.xlabel("Epoch", fontsize=10)
 plt.ylabel("Absolute percentage error", fontsize=10)
 plt.savefig('training_error_rom_dl.png', dpi=200)
 
-tr_losses = history.history['mse']
-vmapes = history.history['val_mse']
+tr_losses = history.history['mean_squared_error']
+vmapes = history.history['val_mean_squared_error']
 plt.semilogy(tr_losses)
 plt.semilogy(vmapes)
 plt.legend(["Mean training error", "Mean validation error"], fontsize=10)
 plt.xlabel("Epoch", fontsize=10)
-plt.ylabel("Mean square error", fontsize=10)
+plt.ylabel("Mean squared error", fontsize=10)
 plt.savefig('training_mse_rom_dl.png', dpi=200)
