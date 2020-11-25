@@ -1,3 +1,4 @@
+import tensorflow
 import sys; sys.path.append('../')
 import numpy as np
 import matplotlib; matplotlib.use('agg')
@@ -12,6 +13,7 @@ from tensorflow.keras import Sequential, Model, Input
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.layers import *
 from tensorflow.keras.regularizers import l1_l2, l2, l1
+from tensorflow.keras.initializers import *
 from tensorflow.keras.callbacks import LearningRateScheduler
 
 def residual_unit(x, activation, n_weights, l1_reg=1e-8, l2_reg=1e-4):
@@ -33,19 +35,21 @@ def res_bn_fc_model(activation, optimizer, lr, n_layers, n_weights, input_shape,
     inputs = Input(shape=(input_shape,))
     bound_input = Input(shape=(output_shape,))
     y = Dense(n_weights, input_shape=(input_shape,), activation=None, 
-            kernel_regularizer=l1_l2(1e-4, 1e-4))(inputs)
+            kernel_regularizer=l1_l2(1e-3, 1e-3))(inputs)
     out = residual_unit(y, activation, n_weights)
     for i in range(1,n_layers):
         out = residual_unit(out, activation, n_weights)
     out = BatchNormalization()(out)
     out = activation(out)
+    #  out = Dense(output_shape, activation='tanh', kernel_initializer=Zeros())(out)
     out = Dense(output_shape, activation='tanh')(out)
-    out = Multiply()([out, bound_input])
-    model = Model(inputs=inputs, outputs=out)
+    multiplied = Multiply()([out, bound_input])
+    model = Model(inputs=[inputs, bound_input], outputs=multiplied)
+    #  model = Model(inputs=inputs, outputs=out)
     model.compile(loss='mse', optimizer=optimizer(lr=lr), metrics=['mape'])
     return model
 
-initial_learning_rate = 1e-4
+initial_learning_rate = 1e-2
 def lr_schedule(epoch):
     '''Callback function to schedule learning rate decay'''
     if epoch<=1000:
@@ -66,15 +70,22 @@ reduced_basis        = np.load('reduced_basis.npy')
 reduced_state_values = np.load('reduced_state_samples.npy')
 reduced_qoi_values   = np.load('reduced_qoi_samples.npy')
 qoi_bounds = np.abs(np.load('qoi_bounds.npy'))
+a_idx = (np.max(qoi_values.reshape(10000,6000), axis=1) < 1)
+parameter_values = parameter_values[a_idx, :]
+state_values = state_values[a_idx, :, :]
+qoi_values = qoi_values[a_idx, :, :]
+reduced_state_values = reduced_state_values[a_idx, :, :]
+reduced_qoi_values = reduced_qoi_values[a_idx, :, :]
+qoi_bounds = qoi_bounds[a_idx, :, :]
 qoi_errors = qoi_values - reduced_qoi_values
 
-mean_parameter_value = np.mean(parameter_values)
-stdev_parameter_value = np.std(parameter_values)
-parameter_values = (parameter_values - mean_parameter_value)/stdev_parameter_value
+#  mean_parameter_value = np.mean(parameter_values)
+#  stdev_parameter_value = np.std(parameter_values)
+#  parameter_values = (parameter_values - mean_parameter_value)/stdev_parameter_value
 
-mean_qoi_errors = np.mean(qoi_errors)
-std_qoi_errors = np.std(qoi_errors)
-qoi_errors = (qoi_errors - mean_qoi_errors)/std_qoi_errors
+#  mean_qoi_errors = np.mean(qoi_errors)
+#  std_qoi_errors = np.std(qoi_errors)
+#  qoi_errors = (qoi_errors - mean_qoi_errors)/std_qoi_errors
 
 parameter_dim = parameter_values.shape[1]
 qoi_dim = qoi_values.shape[1] * qoi_values.shape[2]
@@ -84,30 +95,40 @@ tr_split = int(0.80 * dataset_size)
 
 parameters_train = parameter_values[:tr_split, :]
 parameters_validation = parameter_values[tr_split:, :]
+bounds_train = np.zeros((tr_split, qoi_dim))
+bounds_validation = np.zeros((dataset_size - tr_split, qoi_dim))
 errors_train = np.zeros((tr_split, qoi_dim))
 errors_validation = np.zeros((dataset_size - tr_split, qoi_dim))
 
 for idx in range(dataset_size):
     if idx < tr_split:
         errors_train[idx, :] = qoi_errors[idx, :, :].reshape((qoi_dim,))
+        bounds_train[idx, :] = 1.1 * qoi_bounds[idx, :, :].reshape((qoi_dim,))
     else:
         errors_validation[idx-tr_split, :] = qoi_errors[idx, :, :].reshape((qoi_dim,))
+        bounds_validation[idx-tr_split, :] = 1.1 * qoi_bounds[idx, :, :].reshape((qoi_dim,))
 
-n_weights = 300
+n_weights = 500
 n_training_epochs = 5000
-n_batch_size = 1000
+n_batch_size = 50
 n_residual_units = 2
 model = res_bn_fc_model(
         ELU(), Adam, initial_learning_rate, n_residual_units, n_weights, parameter_dim, qoi_dim)
 model.summary()
 
 cbks = [LearningRateScheduler(lr_schedule)]
-history = model.fit(parameters_train, errors_train, 
+history = model.fit([parameters_train, bounds_train], errors_train, 
         epochs=n_training_epochs, 
         batch_size=n_batch_size, 
         shuffle=True, 
-        validation_data=(parameters_validation, errors_validation),
+        validation_data=([parameters_validation, bounds_validation], errors_validation),
         callbacks=cbks)
+#  history = model.fit(parameters_train, errors_train, 
+        #  epochs=n_training_epochs, 
+        #  batch_size=n_batch_size, 
+        #  shuffle=True, 
+        #  validation_data=(parameters_validation, errors_validation),
+        #  callbacks=cbks)
 
 #  # Plots the training and validation loss
 tr_losses = history.history['mape']
@@ -119,8 +140,8 @@ plt.xlabel("Epoch", fontsize=10)
 plt.ylabel("Absolute percentage error", fontsize=10)
 plt.savefig('training_error_rom_dl.png', dpi=200)
 
-tr_losses = history.history['mean_squared_error']
-vmapes = history.history['val_mean_squared_error']
+tr_losses = history.history['loss']
+vmapes = history.history['val_mse']
 plt.semilogy(tr_losses)
 plt.semilogy(vmapes)
 plt.legend(["Mean training error", "Mean validation error"], fontsize=10)

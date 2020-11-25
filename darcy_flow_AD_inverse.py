@@ -1167,8 +1167,14 @@ if __name__ == "__main__":
 
             misfit.observe(x_snapshots, misfit.data)
 
+            out_of_bounds = False
             for time_idx, observation in enumerate(misfit.data.data):
+                if np.max(observation[:]) > 1e2:
+                    out_of_bounds = True
                 qoi_values[sampling_idx, time_idx, :] = observation[:]
+            if out_of_bounds:
+                print("Large value in QoI encountered. Resampling...")
+                continue
 
             r_snapshots = problem.generate_vector("REDUCED_STATE")
             x_r_snapshots = [r_snapshots, kappa, None]
