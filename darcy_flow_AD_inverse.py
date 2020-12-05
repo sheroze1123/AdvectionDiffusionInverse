@@ -9,9 +9,6 @@ from petsc4py import PETSc
 # Compute MAP estimate using gradients
 from scipy.optimize import minimize, Bounds
 
-# Scaling of the parameter to handle finite difference check issues with hippylib
-ksv = 1.0
-
 # Dimensions of the mesh extremeties
 L = 1.0
 W = 1.00
@@ -132,10 +129,9 @@ class SpaceTimePointwiseStateObservation(Misfit):
             # Second variations involving parameters is zero
             pass
 
-
 class TimeDependentAdvectionDiffusion:
     def __init__(self, mesh, Vh, prior, misfit, simulation_times, velocity, u_0, \
-            observation_times, gls_stab=False, debug=False):
+            observation_times, parameter_basis, gls_stab=False, debug=False):
         '''Initialize a time-dependent advection diffusion problem
 
         Inputs:
@@ -175,7 +171,7 @@ class TimeDependentAdvectionDiffusion:
         self.u_old = dl.Function(Vh[STATE])
         self.p_old = dl.Function(Vh[ADJOINT])
         self.kappa = dl.Function(Vh[PARAMETER])
-        kappa_scaling = dl.Constant(ksv) # Used to make the problem less diffusive without having negative values
+        self.approx_kappa = dl.Function(Vh[PARAMETER])
 
         dt_expr = dl.Constant(self.dt)
 
@@ -225,9 +221,9 @@ class TimeDependentAdvectionDiffusion:
         self.Mt_stab = dl.assemble(Mt_stab_varf)
 
         # Variational form for time-stepping
-        N_varf = (ufl.inner(kappa_scaling * self.kappa * ufl.grad(u_trial), ufl.grad(u_test)) \
+        N_varf = (ufl.inner(self.kappa * ufl.grad(u_trial), ufl.grad(u_test)) \
                 + ufl.inner(velocity, ufl.grad(u_trial)) * u_test) * ufl.dx
-        Nt_varf = (ufl.inner(kappa_scaling * self.kappa * ufl.grad(p_test), ufl.grad(p_trial)) \
+        Nt_varf = (ufl.inner(self.kappa * ufl.grad(p_test), ufl.grad(p_trial)) \
                 + ufl.inner(velocity, ufl.grad(p_test)) * p_trial) * ufl.dx
 
         stab_varf = tau*ufl.inner(r_trial, r_test) * ufl.dx
@@ -248,7 +244,7 @@ class TimeDependentAdvectionDiffusion:
         self.solved_u_tilde = dl.Function(Vh[STATE])
         self.solved_p_tilde = dl.Function(Vh[ADJOINT])
         self.k_hat = dl.TestFunction(Vh[PARAMETER])
-        self.grad_form = ufl.inner(kappa_scaling * self.k_hat * ufl.grad(self.solved_u), ufl.grad(self.solved_p)) * ufl.dx
+        self.grad_form = ufl.inner(self.k_hat * ufl.grad(self.solved_u), ufl.grad(self.solved_p)) * ufl.dx
 
         # Setup required storage for Hessian evaluation
         # Refer this guide for a reference: http://g2s3.com/labs/notebooks/Poisson_INCG.html
@@ -257,8 +253,8 @@ class TimeDependentAdvectionDiffusion:
         self.p_s = TimeDependentVector(self.simulation_times) # Solved adjoint values
         self.p_s.initialize(self.M, 0)
         self.k_first_var = dl.Function(Vh[PARAMETER]) # First variation direction of parameter
-        self.C_form = ufl.inner(kappa_scaling * self.k_first_var * ufl.grad(self.solved_u), ufl.grad(u_test)) * ufl.dx
-        self.W_um_form = ufl.inner(kappa_scaling * self.k_first_var * ufl.grad(p_test), ufl.grad(self.solved_p)) * ufl.dx
+        self.C_form = ufl.inner(self.k_first_var * ufl.grad(self.solved_u), ufl.grad(u_test)) * ufl.dx
+        self.W_um_form = ufl.inner(self.k_first_var * ufl.grad(p_test), ufl.grad(self.solved_p)) * ufl.dx
 
         # Setup required objects for solving reduced order models
         phi = None
@@ -280,6 +276,31 @@ class TimeDependentAdvectionDiffusion:
         self.approximate_residuals.initialize(self.M, 0)
         self.true_qoi_errors = np.zeros((len(self.observation_times), len(self.misfit.ntargets)))
         self.qoi_bounds = np.zeros((len(self.observation_times), len(self.misfit.ntargets)))
+        self.approx_qoi_bounds = np.zeros((len(self.observation_times), len(self.misfit.ntargets)))
+
+        # Karhunen-Loeve expansion of parameter. Accumulate the affine diffusion component of the operator
+        self.KL_dim = parameter_basis.shape[1]
+        self.parameter_basis = parameter_basis
+        self.parameter_proj = np.dot(self.parameter_basis, self.parameter_basis.T)
+        self.KL_coefs = []
+        self.KL_varfs = []
+        self.KL_diff_varf = None 
+        for ii in range(self.KL_dim):
+            KL_coef = dl.Constant(1.0)
+            self.KL_coefs.append(KL_coef)
+            KL_eig_f = dl.Function(Vh[PARAMETER])
+            KL_eig_f.vector().set_local(parameter_basis[:, ii])
+            varf = ufl.inner(KL_eig_f * ufl.grad(u_trial), ufl.grad(u_test)) * ufl.dx
+            self.KL_varfs.append(varf)
+            diff_varf = self.KL_coefs[ii] * varf
+            if self.KL_diff_varf is None:
+                self.KL_diff_varf = diff_varf
+            else:
+                self.KL_diff_varf += diff_varf
+
+        # LHS variational form to be solved at each time step using affine decomposition
+        vel_varf = ufl.inner(velocity, ufl.grad(u_trial)) * u_test * ufl.dx
+        self.affine_L_varf = M_varf + dt_expr * self.KL_diff_varf + dt_expr * vel_varf
 
     def set_reduced_basis(self, phi):
         dofs, n_basis = phi.shape
@@ -351,6 +372,8 @@ class TimeDependentAdvectionDiffusion:
 
         # Assemble LHS dependent on parameters
         self.kappa.vector().set_local(x[PARAMETER])
+        #  self.approx_kappa.vector().set_local(np.dot(self.parameter_proj, self.kappa.vector()[:]))
+        #  self.kappa.assign(self.approx_kappa)
 
         u = dl.Function(self.Vh[STATE])
 
@@ -389,7 +412,16 @@ class TimeDependentAdvectionDiffusion:
 
         # TODO replace this with affine decomposition to avoid assembly when parameters change
         self.kappa.vector().set_local(x[PARAMETER])
+        #  self.approx_kappa.vector().set_local(np.dot(self.parameter_proj, self.kappa.vector()[:]))
+        #  self.kappa.assign(self.approx_kappa)
         L = dl.as_backend_type(dl.assemble(self.L_varf)).mat()
+
+        # KL affine decomposition operator assembly. Can be precomputed
+        #  KL_coefs = np.dot(self.parameter_basis.T, self.kappa.vector()[:])
+        #  for ii in range(self.KL_dim):
+            #  self.KL_coefs[ii].assign(KL_coefs[ii])
+        #  L = dl.as_backend_type(dl.assemble(self.affine_L_varf)).mat()
+
 
         Psi = L.matMult(self.phi.mat()) # Petrov-Galerkin projection
         #  Psi = self.phi.mat() #Galerkin projection
@@ -441,6 +473,8 @@ class TimeDependentAdvectionDiffusion:
         out.zero()
         self.p_s.zero()
         self.kappa.vector().set_local(x[PARAMETER])
+        #  self.approx_kappa.vector().set_local(np.dot(self.parameter_proj, self.kappa.vector()[:]))
+        #  self.kappa.assign(self.approx_kappa)
 
         grad_state = TimeDependentVector(self.simulation_times)
         grad_state.initialize(self.M, 0)
@@ -466,7 +500,8 @@ class TimeDependentAdvectionDiffusion:
         lam = np.zeros((num_sim_times, self.ndofs, num_targets))
         L_T = dl.assemble(self.Lt_varf).array()
         M_T = self.Mt_stab.array()
-        self.qoi_bounds[:] = 0
+        self.qoi_bounds[:] = 0.0
+        self.approx_qoi_bounds[:] = 0.0
         lam_old = np.linalg.solve(L_T, self.B_T)
         lam[-1, :, :] = lam_old
 
@@ -488,6 +523,7 @@ class TimeDependentAdvectionDiffusion:
                 timesteps_since_observation = int(np.rint((observation_time - t)/self.dt))
                 lam_idx = -(1 + timesteps_since_observation)
                 self.qoi_bounds[j, :] += np.dot(-lam[lam_idx, :, :].T, residual_w_reduced[:])
+                self.approx_qoi_bounds[j, :] += np.dot(np.abs(lam[lam_idx, :, :].T), np.abs(residual_w_reduced[:]))
             #####################################################################
 
             grad_state.retrieve(grad_state_snap, t)
@@ -498,7 +534,9 @@ class TimeDependentAdvectionDiffusion:
             out.store(p, t)
             self.p_s.store(p, t) #TODO Fix duplicate storage
 
-        assert np.allclose(self.true_qoi_errors, self.qoi_bounds), "Invalid bounds"
+        #  if not np.allclose(self.true_qoi_errors, self.qoi_bounds):
+        if not np.all(self.approx_qoi_bounds > self.true_qoi_errors):
+            import pdb; pdb.set_trace()
         return True
 
     def solveReducedAdj(self, out, x):
@@ -734,19 +772,19 @@ def computeVelocityField(mesh, plot_velocity=False):
     # Permeability tensor (assumed to be isotropic)
     K = dl.Function(Wh)
     correlation_length = 0.15
-    prior_std_dev = 2.0/ksv
+    prior_std_dev = 2.0
     delta = 1.0/np.sqrt(correlation_length * prior_std_dev)
     gamma = delta * correlation_length * correlation_length
     prior = BiLaplacianPrior(Wh, gamma, delta, robin_bc=True)
 
-    prior.mean = dl.interpolate(dl.Constant(1.0/ksv), Wh).vector()
+    prior.mean = dl.interpolate(dl.Constant(1.0), Wh).vector()
     noise = dl.Vector()
     prior.init_vector(noise, "noise")
     true_kappa = dl.Vector()
     prior.init_vector(true_kappa, 0)
     parRandom.normal(1., noise)
     prior.sample(noise, true_kappa)
-    sampled_values = np.exp(ksv * true_kappa[:]); true_kappa.set_local(sampled_values)
+    sampled_values = np.exp(true_kappa[:]); true_kappa.set_local(sampled_values)
     K.vector().set_local(true_kappa)
 
     if plot_velocity:
@@ -808,7 +846,7 @@ if __name__ == "__main__":
         pass
 
     # Turn on debug mode to plot all quantities and print debug values
-    debug = False
+    debug = True
 
     #np.random.seed(123)
     sep = "\n"+"#"*80+"\n"
@@ -852,23 +890,38 @@ if __name__ == "__main__":
     # http://g2s3.com/labs/notebooks/Gaussian_priors.html and using hippylib. 
     # The prior is parametrized by the correlation length and the pointwise variance
     correlation_length = 0.5
-    prior_std_dev = 0.005/ksv
+    prior_std_dev = 0.005
     gamma = 1.0/(correlation_length * prior_std_dev)
     delta = gamma/(correlation_length * correlation_length)
     prior = BiLaplacianPrior(Vh, gamma, delta, robin_bc=True)
 
     # The true diffusivity is drawn from the same distribution as the prior but 
     # with a different mean
-    prior.mean = dl.interpolate(dl.Constant(0.002/ksv), Vh).vector()
+    prior.mean = dl.interpolate(dl.Constant(0.002), Vh).vector()
     noise = dl.Vector()
     prior.init_vector(noise, "noise")
     true_kappa = dl.Vector()
+    true_kappa_f = dl.Function(Vh)
     prior.init_vector(true_kappa, 0)
     parRandom.normal(1., noise)
     prior.sample(noise, true_kappa)
-    sampled_values = ksv * true_kappa[:]; true_kappa.set_local(sampled_values)
+    sampled_values = true_kappa[:]; true_kappa.set_local(sampled_values)
 
-    prior.mean = dl.interpolate(dl.Constant(0.004/ksv), Vh).vector()
+    prior.mean = dl.interpolate(dl.Constant(0.004), Vh).vector()
+
+    # Karhunen-Loeve expansion of parameters
+    n_parameter_samples = 200
+    parameter_samples = np.zeros((Vh.dim(), n_parameter_samples))
+    sample = dl.Vector()
+    prior.init_vector(sample, 0)
+    for parameter_sample_idx in range(n_parameter_samples):
+        parRandom.normal(1., noise)
+        prior.sample(noise, sample)
+        parameter_samples[:, parameter_sample_idx] = sample[:]
+    UU, SS, VV = np.linalg.svd(parameter_samples)
+
+    KL_dim = 10
+    parameter_basis = UU[:, :KL_dim]
 
     # Visualize draws from the prior for debugging purposes
     if debug:
@@ -883,7 +936,7 @@ if __name__ == "__main__":
         for i in range(6):
             parRandom.normal(1., noise)
             prior.sample(noise, sample)
-            sampled_values = ksv * sample[:]; sample.set_local(sampled_values)
+            sampled_values = sample[:]; sample.set_local(sampled_values)
             ss.append(vector2Function(sample, Vh))
                 
         nb.multi1_plot(ss[0:3], ["sample 1", "sample 2", "sample 3"])
@@ -906,7 +959,8 @@ if __name__ == "__main__":
     observation_times = simulation_times[round(t_1/dt)::round(observation_dt/dt)]
 
     # Define observation targets. Chosen randomly on the domain
-    targets = np.random.uniform([0.0, 0.0], [L, W], (200, 2))
+    ntargets = 20
+    targets = np.random.uniform([0.0, 0.0], [L, W], (ntargets, 2))
     if rank == 0:
         print("Number of observation points: {0}".format(targets.shape[0]))
 
@@ -914,7 +968,7 @@ if __name__ == "__main__":
     misfit = SpaceTimePointwiseStateObservation(Vh, observation_times, targets)
 
     problem = TimeDependentAdvectionDiffusion(
-        mesh, [Vh, Vh, Vh], prior, misfit, simulation_times, velocity, u_0, observation_times, False, debug)
+        mesh, [Vh, Vh, Vh], prior, misfit, simulation_times, velocity, u_0, observation_times, parameter_basis, False, debug)
     #  problem.left_inflow.apply(u_0.vector())
 
     if rank == 0:
@@ -958,7 +1012,6 @@ if __name__ == "__main__":
             
         parRandom.normal(1., noise)
         prior.sample(noise, kappa)
-        sampled_values = ksv * kappa[:]; kappa.set_local(sampled_values)
 
         snapshots = problem.generate_vector(STATE)
         x_snapshots = [snapshots, kappa, None]
@@ -1093,32 +1146,34 @@ if __name__ == "__main__":
         problem.evalGradientParameter(x_r, grad_x, misfit_only=False, use_ROM=True)
         return grad_x[:]
 
-    #  starting_parameter_values = prior.mean[:]
-    #  starting_parameter_values = dl.interpolate(dl.Constant(0.003/ksv), Vh).vector()[:]
-    #  print(f'Starting cost: {reduced_cost_function(starting_parameter_values)}')
-    #  bounds = Bounds(0.001, 0.006)
-    #  res = minimize(reduced_cost_function, starting_parameter_values, 
-            #  method='L-BFGS-B', 
-            #  jac=reduced_gradient,
-            #  bounds=bounds,
-            #  options={'ftol':1e-8, 'gtol':1e-8, 'maxls':20, 'iprint':11})
-    #  print(f'\nstatus: {res.success}, message: {res.message}, n_it: {res.nit}')
-    #  print(f'Minimum cost: {res.fun:.3F}')
+    solve_reduced_inverse = True
 
-    #  reconstruction_ROM = problem.generate_vector(PARAMETER)
-    #  reconstruction_ROM.set_local(res.x)
-    #  print(f"Relative reconstruction error with ROM forward: {dl.norm(reconstruction_ROM - true_kappa)/dl.norm(true_kappa)}")
+    if solve_reduced_inverse:
+        starting_parameter_values = prior.mean[:]
+        #  starting_parameter_values = dl.interpolate(dl.Constant(0.003), Vh).vector()[:]
+        print(f'Starting cost: {reduced_cost_function(starting_parameter_values)}')
+        bounds = Bounds(0.001, 0.006)
+        res = minimize(reduced_cost_function, starting_parameter_values, 
+                method='L-BFGS-B', 
+                jac=reduced_gradient,
+                bounds=bounds,
+                options={'ftol':1e-8, 'gtol':1e-8, 'maxls':20, 'iprint':11})
+        print(f'\nstatus: {res.success}, message: {res.message}, n_it: {res.nit}')
+        print(f'Minimum cost: {res.fun:.3F}')
 
-    true_kappa_f = dl.Function(Vh)
-    #  true_kappa_f.vector().set_local(true_kappa)
-    #  m_f = dl.Function(Vh)
-    #  m_f.vector().set_local(reconstruction_ROM)
+        reconstruction_ROM = problem.generate_vector(PARAMETER)
+        reconstruction_ROM.set_local(res.x)
+        print(f"Relative reconstruction error with ROM forward: {dl.norm(reconstruction_ROM - true_kappa)/dl.norm(true_kappa)}")
 
-    #  nb.multi1_plot([true_kappa_f, m_f], ["True diffusion", "Solution ROM"], vmax=1.05*np.max(true_kappa[:]), vmin=0.95*np.min(true_kappa[:]))
-    #  plt.show()
+        true_kappa_f.vector().set_local(true_kappa)
+        m_f = dl.Function(Vh)
+        m_f.vector().set_local(reconstruction_ROM)
+
+        nb.multi1_plot([true_kappa_f, m_f], ["True diffusion", "Solution ROM"], vmax=1.05*np.max(true_kappa[:]), vmin=0.95*np.min(true_kappa[:]))
+        plt.show()
     ####################################################################
     # Learnt corrective term 
-    create_dataset = True
+    create_dataset = False
 
     if create_dataset:
         prior_mean = prior.mean
@@ -1148,7 +1203,6 @@ if __name__ == "__main__":
                 mean_val = np.exp(np.random.uniform(np.log(1e-3), np.log(1e-2)))
                 prior.mean = dl.interpolate(dl.Constant(mean_val), Vh).vector()
                 prior.sample(noise, kappa)
-                sampled_values = ksv * kappa[:]; kappa.set_local(sampled_values)
                 if np.min(sampled_values) > 1e-4:
                     break
 
@@ -1194,7 +1248,8 @@ if __name__ == "__main__":
             if not is_bound_valid:
                 # Erroneous solution, retry
                 continue
-            qoi_bounds[sampling_idx, :, :] = problem.qoi_bounds[:, :]
+            #  qoi_bounds[sampling_idx, :, :] = problem.qoi_bounds[:, :]
+            qoi_bounds[sampling_idx, :, :] = problem.approx_qoi_bounds[:, :]
             sampling_idx += 1
 
         np.save('parameter_samples.npy', parameter_values)
@@ -1224,7 +1279,7 @@ if __name__ == "__main__":
 
         # Use hippylib to perform the gradient and Hessian check
         n_eps = 24
-        eps_begin_idx = np.ceil(np.log(0.001/ksv)/np.log(0.5)) # hippylib finite differencing isn't smart
+        eps_begin_idx = np.ceil(np.log(0.001)/np.log(0.5)) # hippylib finite differencing isn't smart
         eps = np.power(.5, np.arange(eps_begin_idx, n_eps+eps_begin_idx))
         modelVerify(problem, m0, is_quadratic=True,
                 misfit_only=False,  verbose=(rank == 0), eps=eps)
