@@ -13,8 +13,9 @@ L = 1.0
 W = 1.0
 
 class TimeDependentAdvectionDiffusion:
-    def __init__(self, mesh, Vh, prior, misfit, simulation_times, velocity, u_0, \
-            observation_times, parameter_basis, gls_stab=False, debug=False):
+    def __init__(self, mesh, Vh, prior, misfit, simulation_times, velocity, \
+            u_0, observation_times, parameter_basis, \
+            gls_stab=False, debug=False):
         '''Initialize a time-dependent advection diffusion problem
 
         Inputs:
@@ -441,8 +442,7 @@ class TimeDependentAdvectionDiffusion:
             out.store(p, t)
             self.p_s.store(p, t) #TODO Fix duplicate storage
 
-        #  if not np.allclose(self.true_qoi_errors, self.qoi_bounds):
-        if not np.all(self.approx_qoi_bounds > self.true_qoi_errors):
+        if not np.allclose(np.abs(self.true_qoi_errors), self.approx_qoi_bounds, rtol=1.0):
             import pdb; pdb.set_trace()
         return True
 
