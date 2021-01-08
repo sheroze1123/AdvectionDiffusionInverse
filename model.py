@@ -289,6 +289,87 @@ class TimeDependentAdvectionDiffusion:
             self.u_s.store(u.vector(), t) #TODO Fix duplicate storage
             self.u_old.assign(u)
 
+    def solveAffineROM(self, out, x):
+        '''Leverage spatially averaged parameter values to perform implicit time-stepping
+        and solve the forward problem in the reduced subspace determined by the basis phi.
+        Uses a Petrov-Galerkin projection. Assumes that the averaged_params are set. #TODO
+        '''
+        out.zero()
+        assert type(x[1]) != np.ndarray, "Invalid parameter type"
+
+        # Set reduced initial condition
+        u_r = dl.Vector() # Coordinates of the reduced space
+        self.phi.init_vector(u_r, 1) # u = Phi * u_r
+        self.phi.transpmult(self.u_0.vector(), u_r)
+        out.store(u_r, 0.)
+
+        # Store approximate solutions using ROMs in the original state space
+        self.u_tildes.zero()
+        u_tilde = dl.Vector()
+        self.M.init_vector(u_tilde, 0)
+        self.phi.mult(u_r, u_tilde)
+        self.u_tildes.store(u_tilde, 0.)
+
+        self.L_u_tildes.zero()
+        L_u_tilde = dl.Vector()
+        self.M.init_vector(L_u_tilde, 0)
+
+        # Right-hand side of reduced system of equations
+        rhs = dl.Vector()
+        self.phi.init_vector(rhs, 1)
+
+        # Operator assembly for spatially averaged parameters
+        averaged_params = x[PARAMETER]
+        for p in range(len(self.averaged_params)):
+            self.averaged_params[p].assign(averaged_params[p])
+        affine_L = dl.as_backend_type(dl.assemble(self.averaged_L_varf)).mat()
+        self.kappa.vector().set_local(
+                averaged_params_to_func(averaged_params, self.a_dx, self.Vh[PARAMETER]).vector())
+        L = dl.as_backend_type(dl.assemble(self.L_varf)).mat()
+        affine_L = L
+
+        Psi = affine_L.matMult(self.phi.mat()) # Petrov-Galerkin projection
+        #  Psi = self.phi.mat() #Galerkin projection
+
+        # Left-hand size of reduced system of equations
+        self.L_r = dl.PETScMatrix(Psi.transposeMatMult(Psi))
+
+        # Reduced source term # TODO: Could be optimized and precomputed w/ affine decomposition
+        S = dl.assemble(self.S_varf)
+        self.S_r = dl.Vector()
+        Psi_p = dl.PETScMatrix(Psi)
+        Psi_p.transpmult(S, self.S_r)
+
+        # Reduced mass matrix #TODO: Precompute w/ affine decomposition
+        M_phi = dl.as_backend_type(self.M).mat().matMult(self.phi.mat())
+        self.M_r = dl.PETScMatrix(Psi.transposeMatMult(M_phi))
+
+        # Dual-weighted residual stuff
+        M_u_tilde_prev = dl.Vector()
+        self.M.init_vector(M_u_tilde_prev, 0)
+        B_phi = np.dot(self.misfit.B.array(), self.phi.mat().getDenseArray())
+
+        for t_idx, t in enumerate(self.simulation_times[1::]):
+            self.M.mult(u_tilde, M_u_tilde_prev)
+            self.M_r.mult(u_r, rhs)
+            rhs.axpy(1., self.S_r)
+            dl.solve(self.L_r, u_r, rhs, "cg")
+            out.store(u_r, t)
+            self.phi.mult(u_r, u_tilde)
+            self.u_tildes.store(u_tilde, t)
+            dl.PETScMatrix(affine_L).mult(u_tilde, L_u_tilde)
+            self.L_u_tildes.store(L_u_tilde, t)
+            residual_fom = L_u_tilde - S - M_u_tilde_prev
+            self.approximate_residuals.store(residual_fom, t)
+
+            if t in self.observation_times:
+                obs_idx = np.searchsorted(self.observation_times, t)
+                u = dl.Vector()
+                self.M.init_vector(u, 0)
+                self.u_s.retrieve(u, t)
+                true_e = np.dot(self.misfit.B.array(), u[:]) - np.dot(self.misfit.B.array(), u_tilde[:])
+                self.true_qoi_errors[obs_idx, :] = true_e
+
     def solveReducedFwd(self, out, x):
         '''Perform implicit time-stepping and solve the forward problem in the 
         reduced subpsace determined by the basis phi. Uses a Petrov-Galerkin projection'''
@@ -315,21 +396,8 @@ class TimeDependentAdvectionDiffusion:
         rhs = dl.Vector()
         self.phi.init_vector(rhs, 1)
 
-        # TODO replace this with affine decomposition to avoid assembly when parameters change
         self.kappa.vector().set_local(x[PARAMETER])
-        #  self.approx_kappa.vector().set_local(np.dot(self.parameter_proj, self.kappa.vector()[:]))
-        #  self.kappa.assign(self.approx_kappa)
         L = dl.as_backend_type(dl.assemble(self.L_varf)).mat()
-
-        # KL affine decomposition operator assembly. Can be precomputed
-        averaged_params = np.dot(self.averaging_op, self.kappa.vector()[:])
-        for p in range(len(self.averaged_params)):
-            self.averaged_params[p].assign(averaged_params[p])
-        affine_L = dl.as_backend_type(dl.assemble(self.averaged_L_varf)).mat()
-        #  KL_coefs = np.dot(self.parameter_basis.T, self.kappa.vector()[:])
-        #  for ii in range(self.KL_dim):
-            #  self.KL_coefs[ii].assign(KL_coefs[ii])
-        #  L = dl.as_backend_type(dl.assemble(self.affine_L_varf)).mat()
 
         Psi = L.matMult(self.phi.mat()) # Petrov-Galerkin projection
         #  Psi = self.phi.mat() #Galerkin projection
@@ -347,13 +415,10 @@ class TimeDependentAdvectionDiffusion:
         M_phi = dl.as_backend_type(self.M).mat().matMult(self.phi.mat())
         self.M_r = dl.PETScMatrix(Psi.transposeMatMult(M_phi))
 
-
         # Dual-weighted residual stuff
         M_u_tilde_prev = dl.Vector()
         self.M.init_vector(M_u_tilde_prev, 0)
         B_phi = np.dot(self.misfit.B.array(), self.phi.mat().getDenseArray())
-        #  lam = np.linalg.solve(self.L_r.array().T, -B_phi.T) #TODO: incorrect lambda
-
 
         for t_idx, t in enumerate(self.simulation_times[1::]):
             self.M.mult(u_tilde, M_u_tilde_prev)
@@ -485,10 +550,85 @@ class TimeDependentAdvectionDiffusion:
             L.mult(p_tilde, L_p_tilde)
             self.L_p_tildes.store(L_p_tilde, t)
 
+    def solveAffineROMAdj(self, out, x):
+        '''Perform implicit time-stepping and solve the adjoint problem in the 
+        reduced subpsace determined by the basis phi. Uses a Petrov-Galerkin projection'''
+        out.zero()
+        self.p_tildes.zero()
+        p_tilde = dl.Vector()
+        self.M.init_vector(p_tilde, 0)
+
+        self.L_p_tildes.zero()
+        L_p_tilde = dl.Vector()
+        self.M.init_vector(L_p_tilde, 0)
+        L = dl.as_backend_type(dl.assemble(self.L_varf))
+
+        grad_state = TimeDependentVector(self.simulation_times)
+        grad_state.initialize(self.phi, 1)
+        grad_state_snap = dl.Vector() 
+        self.phi.init_vector(grad_state_snap, 1)
+        self.misfit.grad_reduced(STATE, self.u_tildes, grad_state, self.phi)
+
+        # Set reduced initial condition
+        p_r = dl.Vector()
+        self.phi.init_vector(p_r, 1) # p_tilde = Phi * p_r
+
+        rhs = dl.Vector()
+        self.phi.init_vector(rhs, 1)
+
+        L_r_t = dl.PETScMatrix(self.L_r.mat().transpose())
+
+        for t in self.simulation_times[1::]:
+            self.M_r.transpmult(p_r, rhs)
+            grad_state.retrieve(grad_state_snap, t)
+            rhs.axpy(-1., grad_state_snap)
+            dl.solve(L_r_t, p_r, rhs, "cg")
+            out.store(p_r, t)
+            self.phi.mult(p_r, p_tilde)
+            self.p_tildes.store(p_tilde, t)
+            L.mult(p_tilde, L_p_tilde)
+            self.L_p_tildes.store(L_p_tilde, t)
+
     def evalGradientParameter(self, x, mg, misfit_only=False, use_ROM=False):
         '''Evaluate gradient with respect to parameters'''
         self.prior.init_vector(mg, 1)
         mg.zero()
+        if misfit_only == False:
+            dm = x[PARAMETER] - self.prior.mean
+            self.prior.R.mult(dm, mg)
+
+        if use_ROM:
+            u = dl.Vector()
+            self.M.init_vector(u, 0)
+            p = dl.Vector()
+            self.M.init_vector(p, 0)
+            for t in self.simulation_times[1::]:
+                self.u_tildes.retrieve(self.solved_u.vector(), t)
+                self.L_p_tildes.retrieve(self.solved_p.vector(), t)
+                mg.axpy(1., dl.assemble(self.grad_form))
+                self.L_u_tildes.retrieve(self.solved_u.vector(), t)
+                self.p_tildes.retrieve(self.solved_p.vector(), t)
+                mg.axpy(1., dl.assemble(self.grad_form))
+        else:
+            for t in self.simulation_times[1::]:
+                x[STATE].retrieve(self.solved_u.vector(), t)
+                x[ADJOINT].retrieve(self.solved_p.vector(), t)
+                mg.axpy(1., dl.assemble(self.grad_form))
+
+        g = dl.Vector()
+        self.M.init_vector(g,1)
+        
+        try:
+            self.prior.Msolver.solve(g,mg)
+        except RuntimeError:
+            import pdb; pdb.set_trace()
+        
+        grad_norm = g.inner(mg)
+
+        return grad_norm
+
+    def evalGradientAveragedParameter(self, x, misfit_only=False):
+        '''Evaluate gradient with respect to reduced parameters'''
         if misfit_only == False:
             dm = x[PARAMETER] - self.prior.mean
             self.prior.R.mult(dm, mg)
