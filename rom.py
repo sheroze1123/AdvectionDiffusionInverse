@@ -73,6 +73,8 @@ def spatially_averaged_PODROM(problem, n_samples, bounds, pod_thresh=1e-13, debu
     parameter_samples = sampling(n_samples)
     kappa = dl.Vector()
 
+    parameter_samples[0,:] = 0.002
+
     for idx in range(n_samples):
         param = parameter_samples[idx, :]
         kappa = averaged_params_to_func(param, problem.a_dx, Vh).vector()

@@ -194,7 +194,6 @@ if __name__ == "__main__":
     problem.set_reduced_basis(basis)
     problem_ROM.set_reduced_basis(basis)
 
-    import pdb; pdb.set_trace()
     debug = True
     if debug:
         if rank == 0:
@@ -240,60 +239,6 @@ if __name__ == "__main__":
     #  mg = problem.generate_vector(PARAMETER)
     #  grad_norm_r = problem.evalGradientParameter(x, mg, use_ROM=True)
     #  print(f"Norm of the reduced gradient {grad_norm_r}")
-
-    debug = True
-    if debug:
-        mfonly = True
-        h = problem.generate_vector(PARAMETER)
-        parRandom.normal(1., h)
-        
-        u_r = problem.generate_vector("REDUCED_STATE")
-        p_r = problem.generate_vector("REDUCED_STATE")
-        x_r = [u_r, true_kappa, p_r]
-        problem.solveReducedFwd(x_r[0], x_r)
-        problem.solveReducedAdj(x_r[2], x_r)
-        x = [problem.u_tildes, true_kappa, problem.p_tildes]
-        cx = problem.cost(x)
-        
-        grad_x = problem.generate_vector(PARAMETER)
-        problem.evalGradientParameter(x, grad_x, misfit_only=mfonly, use_ROM=True)
-        grad_xh = grad_x.inner( h )
-
-        #  g = dl.Vector()
-        #  problem.M.init_vector(g,1)
-        #  problem.prior.Msolver.solve(g, grad_x)
-        #  grad_norm = g.inner(h)
-        problem.solved_u.vector().set_local(grad_x)
-        problem.solved_p.vector().set_local(h)
-        dir_grad = dl.assemble(problem.inner_prod)
-        print(f"Gradient using ROM: {grad_xh}")
-        print(f"Gradient using ROM (proper inner prod): {dir_grad}")
-        
-        n_eps = 32
-        eps = np.power(.5, np.arange(2, n_eps+2))
-        err_grad = np.zeros(n_eps)
-        
-        for i in range(n_eps):
-            my_eps = eps[i]
-            
-            u_r = problem.generate_vector("REDUCED_STATE")
-            p_r = problem.generate_vector("REDUCED_STATE")
-            k = problem.generate_vector(PARAMETER)
-            x_r_plus = [u_r, k, p_r]
-            x_r_plus[1].axpy(1., true_kappa)
-            x_r_plus[1].axpy(my_eps, h)
-            problem.solveReducedFwd(x_r_plus[0], x_r_plus)
-            problem.solveReducedAdj(x_r_plus[2], x_r_plus)
-            x_plus = [problem.u_tildes, k, problem.p_tildes]
-            
-            idx = 2 if mfonly else 0
-            dc = problem.cost(x_plus)[idx] - cx[idx]
-            print(f"Finite element grad: {dc/my_eps}")
-            err_grad[i] = abs(dc/my_eps - grad_xh)
-
-        plt.loglog(eps, err_grad, "-ob", eps, eps*(err_grad[0]/eps[0]), "-.k")
-        plt.title("FD Gradient Check for State Reduced Model")
-        plt.show()
 
     if debug:
         # Finite element check for double reduced model (reduced parameter and space)

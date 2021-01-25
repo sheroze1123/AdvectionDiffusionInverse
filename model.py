@@ -546,7 +546,7 @@ class TimeDependentAdvectionDiffusion:
 
         L_r_t = dl.PETScMatrix(self.L_r.mat().transpose())
 
-        for t in self.simulation_times[1::]:
+        for t in self.simulation_times[::-1]:
             self.M_r.transpmult(p_r, rhs)
             grad_state.retrieve(grad_state_snap, t)
             rhs.axpy(-1., grad_state_snap)
@@ -595,7 +595,7 @@ class TimeDependentAdvectionDiffusion:
 
         L_r_t = dl.PETScMatrix(self.L_r.mat().transpose())
 
-        for t in self.simulation_times[1::]:
+        for t in self.simulation_times[::-1]:
             self.M_r.transpmult(p_r, rhs)
             grad_state.retrieve(grad_state_snap, t)
             rhs.axpy(-1., grad_state_snap)
@@ -669,17 +669,6 @@ class TimeDependentAdvectionDiffusion:
             A_i_u_tilde = np.dot(self.dL_dsigmak, self.solved_u.vector()[:])
             self.L_p_tildes.retrieve(self.solved_p.vector(), t)
             grad += np.dot(A_i_u_tilde, self.solved_p.vector()[:])
-
-            #  self.u_tildes.retrieve(self.solved_u.vector(), t)
-            #  self.L_p_tildes.retrieve(self.solved_p.vector(), t)
-            #  grad += np.dot(self.solved_p.vector()[:].T, 
-                           #  np.dot(self.dL_dsigmak, 
-                                  #  self.solved_u.vector()[:]).T)
-            #  self.L_u_tildes.retrieve(self.solved_u.vector(), t)
-            #  self.p_tildes.retrieve(self.solved_p.vector(), t)
-            #  grad += np.dot(self.solved_u.vector()[:].T, 
-                           #  np.dot(self.dL_dsigmak, 
-                                  #  self.solved_p.vector()[:]).T)
 
         return grad
 

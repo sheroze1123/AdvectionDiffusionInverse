@@ -12,7 +12,7 @@ from spatial_averaging import *
 L = 1.0
 W = 1.0
 
-class TimeDependentAdvectionDiffusionReduced:
+class TimeDependentAdvectionDiffusionAffineReduced:
     def __init__(self, mesh, Vh, prior, misfit, simulation_times, velocity, \
             u_0, observation_times, parameter_basis, \
             gls_stab=False, debug=False):
@@ -162,6 +162,55 @@ class TimeDependentAdvectionDiffusionReduced:
         self.qoi_bounds = np.zeros((len(self.observation_times), len(self.misfit.ntargets)))
         self.approx_qoi_bounds = np.zeros((len(self.observation_times), len(self.misfit.ntargets)))
 
+        self.inner_prod = ufl.inner(self.solved_u, self.solved_p) * ufl.dx
+
+        # Karhunen-Loeve expansion of parameter. Accumulate the affine diffusion component of the operator
+        self.KL_dim = parameter_basis.shape[1]
+        self.parameter_basis = parameter_basis
+        self.parameter_proj = np.dot(self.parameter_basis, self.parameter_basis.T)
+        self.KL_coefs = []
+        self.KL_varfs = []
+        self.KL_diff_varf = None 
+        for ii in range(self.KL_dim):
+            KL_coef = dl.Constant(1.0)
+            self.KL_coefs.append(KL_coef)
+            KL_eig_f = dl.Function(Vh[PARAMETER])
+            KL_eig_f.vector().set_local(parameter_basis[:, ii])
+            varf = ufl.inner(KL_eig_f * ufl.grad(u_trial), ufl.grad(u_test)) * ufl.dx
+            self.KL_varfs.append(varf)
+            diff_varf = self.KL_coefs[ii] * varf
+            if self.KL_diff_varf is None:
+                self.KL_diff_varf = diff_varf
+            else:
+                self.KL_diff_varf += diff_varf
+
+        # LHS variational form to be solved at each time step using affine decomposition
+        vel_varf = ufl.inner(velocity, ufl.grad(u_trial)) * u_test * ufl.dx
+        self.affine_L_varf = M_varf + dt_expr * self.KL_diff_varf + dt_expr * vel_varf
+
+        # Spatial averaging affine decomposition
+        self.n_sq = 4
+        self.a_dx, self.a_ds = get_measures(mesh, self.n_sq)
+        self.averaged_params = [Constant(1.0) for i in range(self.n_sq * self.n_sq)]
+        self.averaged_L_varf = None
+        self.averaged_S_varf = None
+        self.dL_dsigmak = np.zeros((self.n_sq * self.n_sq, self.ndofs, self.ndofs))
+
+        for i in range(self.n_sq * self.n_sq):
+            M_varf = ufl.inner(u_trial, u_test) * self.a_dx(i+1)
+            N_varf = (ufl.inner(self.averaged_params[i] * ufl.grad(u_trial), ufl.grad(u_test))\
+                    + ufl.inner(velocity, ufl.grad(u_trial)) * u_test) * self.a_dx(i+1)
+            self.dL_dsigmak[i, :, :] = self.dt * dl.assemble(ufl.inner(ufl.grad(u_trial), ufl.grad(u_test)) * self.a_dx(i+1)).array()
+            
+            if i==0:
+                self.averaged_L_varf = M_varf + dt_expr * N_varf
+                self.averaged_S_varf = dt_expr * ufl.inner(source, u_test) * self.a_dx(i+1)
+            else:
+                self.averaged_L_varf += M_varf + dt_expr * N_varf
+                self.averaged_S_varf += dt_expr * ufl.inner(source, u_test) * self.a_dx(i+1)
+
+        self.averaging_op = get_averaging_operator(self.Vh[PARAMETER], self.a_dx, self.n_sq)
+
     def set_reduced_basis(self, phi):
         dofs, n_basis = phi.shape
         self.phi = dl.PETScMatrix(PETSc.Mat().createDense([dofs, n_basis], array=phi))
@@ -208,9 +257,12 @@ class TimeDependentAdvectionDiffusionReduced:
         return [reg+misfit, reg, misfit]
 
     def solveFwd(self, out, x):
-        '''Perform implicit time-stepping and solve the forward problem in the 
-        reduced subpsace determined by the basis phi. Uses a Petrov-Galerkin projection'''
+        '''Leverage spatially averaged parameter values to perform implicit time-stepping
+        and solve the forward problem in the reduced subspace determined by the basis phi.
+        Uses a Petrov-Galerkin projection. Assumes that the averaged_params are set. #TODO
+        '''
         out.zero()
+        assert type(x[1]) == np.ndarray, "Invalid parameter type"
 
         # Set reduced initial condition
         u_r = dl.Vector() # Coordinates of the reduced space
@@ -220,10 +272,10 @@ class TimeDependentAdvectionDiffusionReduced:
 
         # Store approximate solutions using ROMs in the original state space
         self.u_tildes.zero()
-        # TODO : Project and unproject w/ phi
-        self.u_tildes.store(self.u_0.vector(), 0.)
         u_tilde = dl.Vector()
         self.M.init_vector(u_tilde, 0)
+        self.phi.mult(u_r, u_tilde)
+        self.u_tildes.store(u_tilde, 0.)
 
         self.L_u_tildes.zero()
         L_u_tilde = dl.Vector()
@@ -233,17 +285,21 @@ class TimeDependentAdvectionDiffusionReduced:
         rhs = dl.Vector()
         self.phi.init_vector(rhs, 1)
 
-        self.kappa.vector().set_local(x[PARAMETER])
-        L = dl.as_backend_type(dl.assemble(self.L_varf)).mat()
+        # Operator assembly for spatially averaged parameters
+        averaged_params = x[PARAMETER]
+        for p in range(len(self.averaged_params)):
+            self.averaged_params[p].assign(averaged_params[p])
+        affine_L = dl.as_backend_type(dl.assemble(self.averaged_L_varf)).mat()
 
-        Psi = L.matMult(self.phi.mat()) # Petrov-Galerkin projection
+        Psi = affine_L.matMult(self.phi.mat()) # Petrov-Galerkin projection
         #  Psi = self.phi.mat() #Galerkin projection
 
         # Left-hand size of reduced system of equations
         self.L_r = dl.PETScMatrix(Psi.transposeMatMult(Psi))
 
         # Reduced source term # TODO: Could be optimized and precomputed w/ affine decomposition
-        S = dl.assemble(self.S_varf)
+        S = dl.assemble(self.averaged_S_varf)
+        #  import pdb; pdb.set_trace()
         self.S_r = dl.Vector()
         Psi_p = dl.PETScMatrix(Psi)
         Psi_p.transpmult(S, self.S_r)
@@ -265,7 +321,7 @@ class TimeDependentAdvectionDiffusionReduced:
             out.store(u_r, t)
             self.phi.mult(u_r, u_tilde)
             self.u_tildes.store(u_tilde, t)
-            dl.PETScMatrix(L).mult(u_tilde, L_u_tilde)
+            dl.PETScMatrix(affine_L).mult(u_tilde, L_u_tilde)
             self.L_u_tildes.store(L_u_tilde, t)
             residual_fom = L_u_tilde - S - M_u_tilde_prev
             self.approximate_residuals.store(residual_fom, t)
@@ -282,14 +338,19 @@ class TimeDependentAdvectionDiffusionReduced:
         '''Perform implicit time-stepping and solve the adjoint problem in the 
         reduced subpsace determined by the basis phi. Uses a Petrov-Galerkin projection'''
         out.zero()
+
+        # Setup time-dependent vectors necessary for gradient computation
         self.p_tildes.zero()
         p_tilde = dl.Vector()
         self.M.init_vector(p_tilde, 0)
-
         self.L_p_tildes.zero()
         L_p_tilde = dl.Vector()
         self.M.init_vector(L_p_tilde, 0)
-        L = dl.as_backend_type(dl.assemble(self.L_varf))
+
+        averaged_params = x[PARAMETER]
+        for p in range(len(self.averaged_params)):
+            self.averaged_params[p].assign(averaged_params[p])
+        affine_L = dl.as_backend_type(dl.assemble(self.averaged_L_varf)).mat()
 
         grad_state = TimeDependentVector(self.simulation_times)
         grad_state.initialize(self.phi, 1)
@@ -314,48 +375,28 @@ class TimeDependentAdvectionDiffusionReduced:
             out.store(p_r, t)
             self.phi.mult(p_r, p_tilde)
             self.p_tildes.store(p_tilde, t)
-            L.mult(p_tilde, L_p_tilde)
+            dl.PETScMatrix(affine_L).mult(p_tilde, L_p_tilde)
             self.L_p_tildes.store(L_p_tilde, t)
 
     def evalGradientParameter(self, x, mg, misfit_only=False):
-        '''Evaluate gradient with respect to parameters'''
-        self.prior.init_vector(mg, 1)
-        mg.zero()
-        if misfit_only == False:
-            dm = x[PARAMETER] - self.prior.mean
-            self.prior.R.mult(dm, mg)
+        '''Evaluate gradient with respect to reduced parameters'''
 
-        u = dl.Vector()
-        self.M.init_vector(u, 0)
-        p = dl.Vector()
-        self.M.init_vector(p, 0)
+        # TODO: Turn regularization back on
+        #  if misfit_only == False:
+            #  dm = x[PARAMETER] - self.prior.mean
+            #  self.prior.R.mult(dm, mg)
+
+        grad = np.zeros((self.n_sq * self.n_sq))
         for t in self.simulation_times[1::]:
-            self.p_tildes.retrieve(self.solved_u.vector(), t)
-            self.approximate_residuals.retrieve(self.solved_p.vector(), t)
-            mg.axpy(1., dl.assemble(self.grad_form))
-
+            self.p_tildes.retrieve(self.solved_p.vector(), t)
+            self.approximate_residuals.retrieve(self.solved_u.vector(), t)
+            grad += np.dot(np.dot(self.dL_dsigmak, self.solved_p.vector()[:]), self.solved_u.vector()[:])
             self.u_tildes.retrieve(self.solved_u.vector(), t)
+            A_i_u_tilde = np.dot(self.dL_dsigmak, self.solved_u.vector()[:])
             self.L_p_tildes.retrieve(self.solved_p.vector(), t)
-            mg.axpy(1., dl.assemble(self.grad_form))
+            grad += np.dot(A_i_u_tilde, self.solved_p.vector()[:])
 
-            #  self.u_tildes.retrieve(self.solved_u.vector(), t)
-            #  self.L_p_tildes.retrieve(self.solved_p.vector(), t)
-            #  mg.axpy(1., dl.assemble(self.grad_form))
-            #  self.L_u_tildes.retrieve(self.solved_u.vector(), t)
-            #  self.p_tildes.retrieve(self.solved_p.vector(), t)
-            #  mg.axpy(1., dl.assemble(self.grad_form))
-
-        g = dl.Vector()
-        self.M.init_vector(g,1)
-        
-        try:
-            self.prior.Msolver.solve(g,mg)
-        except RuntimeError:
-            import pdb; pdb.set_trace()
-        
-        grad_norm = g.inner(mg)
-
-        return grad_norm
+        return grad
 
     def setPointForHessianEvaluations(self, x, gauss_newton_approx=False):
         '''Specify the point x = [u,a,p] at which the Hessian operator (or the Gauss-Newton approximation)
