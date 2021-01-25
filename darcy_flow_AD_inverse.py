@@ -13,6 +13,7 @@ from scipy.optimize import minimize, Bounds
 from observations import *
 from model import *
 from reduced_model import *
+from affine_reduced_model import *
 from velocity import *
 from prior import *
 from rom import *
@@ -154,6 +155,9 @@ if __name__ == "__main__":
             [Vh, Vh, Vh], prior, misfit, simulation_times, \
             velocity, u_0, observation_times, parameter_basis, False, debug)
 
+    ####################################################################
+    # Synthetic observations
+
     if rank == 0:
         print(sep, "Generate synthetic observation", sep)
 
@@ -182,6 +186,9 @@ if __name__ == "__main__":
     problem_ROM = TimeDependentAdvectionDiffusionReduced(mesh, \
             [Vh, Vh, Vh], prior, misfit, simulation_times, \
             velocity, u_0, observation_times, parameter_basis, False, debug)
+    problem_AROM = TimeDependentAdvectionDiffusionAffineReduced(mesh, \
+            [Vh, Vh, Vh], prior, misfit, simulation_times, \
+            velocity, u_0, observation_times, parameter_basis, False, debug)
 
     pod_thresh = 1e-13
     n_pod_samples = 10
@@ -193,11 +200,11 @@ if __name__ == "__main__":
     basis = spatially_averaged_PODROM(problem, n_pod_samples, param_bounds, pod_thresh, debug)
     problem.set_reduced_basis(basis)
     problem_ROM.set_reduced_basis(basis)
+    problem_AROM.set_reduced_basis(basis)
 
-    debug = True
     if debug:
         if rank == 0:
-            print(sep, "Test the gradient and the Hessian of the reduced model", sep)
+            print(sep, "Test the gradient of the state reduced model", sep)
         m0 = true_kappa.copy()
 
         # Use hippylib to perform the gradient and Hessian check
@@ -205,6 +212,20 @@ if __name__ == "__main__":
         eps_begin_idx = np.ceil(np.log(0.001)/np.log(0.5)) # hippylib finite differencing isn't smart
         eps = np.power(.5, np.arange(eps_begin_idx, n_eps+eps_begin_idx))
         modelVerify(problem_ROM, m0, is_quadratic=True,
+                misfit_only=True,  verbose=(rank == 0), eps=eps, compute_hessian=False)
+        plt.show()
+
+    debug = True
+    if debug:
+        if rank == 0:
+            print(sep, "Test the gradient of the parameter and state reduced model", sep)
+        m0 = np.dot(problem.averaging_op, true_kappa[:])
+
+        # Use hippylib to perform the gradient and Hessian check
+        n_eps = 24
+        eps_begin_idx = np.ceil(np.log(0.001)/np.log(0.5)) # hippylib finite differencing isn't smart
+        eps = np.power(.5, np.arange(eps_begin_idx, n_eps+eps_begin_idx))
+        modelVerify(problem_AROM, m0, is_quadratic=True,
                 misfit_only=True,  verbose=(rank == 0), eps=eps, compute_hessian=False)
         plt.show()
 

@@ -375,7 +375,7 @@ class TimeDependentAdvectionDiffusionAffineReduced:
             dl.PETScMatrix(affine_L).mult(p_tilde, L_p_tilde)
             self.L_p_tildes.store(L_p_tilde, t)
 
-    def evalGradientParameter(self, x, mg, misfit_only=False):
+    def evalGradientParameter(self, x, grad, misfit_only=False):
         '''Evaluate gradient with respect to reduced parameters'''
 
         # TODO: Turn regularization back on
@@ -383,7 +383,6 @@ class TimeDependentAdvectionDiffusionAffineReduced:
             #  dm = x[PARAMETER] - self.prior.mean
             #  self.prior.R.mult(dm, mg)
 
-        grad = np.zeros((self.n_sq * self.n_sq))
         for t in self.simulation_times[1::]:
             self.p_tildes.retrieve(self.solved_p.vector(), t)
             self.approximate_residuals.retrieve(self.solved_u.vector(), t)
