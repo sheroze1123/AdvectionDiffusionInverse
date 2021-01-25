@@ -220,8 +220,7 @@ class TimeDependentAdvectionDiffusionAffineReduced:
         if component == "ALL":
             u_r = TimeDependentVector(self.simulation_times)
             u_r.initialize(self.phi, 1)
-            m = dl.Vector()
-            self.prior.init_vector(m, 0)
+            m = np.zeros((self.n_sq * self.n_sq))
             p_r = TimeDependentVector(self.simulation_times)
             p_r.initialize(self.phi, 1)
             return [u_r, m, p_r]
@@ -230,9 +229,7 @@ class TimeDependentAdvectionDiffusionAffineReduced:
             u_r.initialize(self.phi, 1)
             return u_r
         elif component == PARAMETER:
-            m = dl.Vector()
-            self.prior.init_vector(m, 0)
-            return m
+            return np.zeros((self.n_sq * self.n_sq,))
         elif component == ADJOINT:
             p_r = TimeDependentVector(self.simulation_times)
             p_r.initialize(self.phi, 1)
@@ -242,19 +239,20 @@ class TimeDependentAdvectionDiffusionAffineReduced:
 
     def init_parameter(self, m):
         '''Initialize parameter to be compatible with the prior'''
-        self.prior.init_vector(m, 0)
+        raise
 
     def cost(self, x):
         '''Evaluate the cost functional to be optimized for the inverse problem'''
-        Rdx = dl.Vector()
-        self.prior.init_vector(Rdx, 0)
-        dx = x[PARAMETER] - self.prior.mean
-        self.prior.R.mult(dx, Rdx)
-        reg = .5*Rdx.inner(dx)
+        #  Rdx = dl.Vector()
+        #  self.prior.init_vector(Rdx, 0)
+        #  dx = x[PARAMETER] - self.prior.mean
+        #  self.prior.R.mult(dx, Rdx)
+        #  reg = .5*Rdx.inner(dx)
 
         misfit = self.misfit.cost([self.u_tildes, x, None])
 
-        return [reg+misfit, reg, misfit]
+        return [misfit, None, misfit]
+        #  return [reg+misfit, reg, misfit]
 
     def solveFwd(self, out, x):
         '''Leverage spatially averaged parameter values to perform implicit time-stepping
@@ -299,7 +297,6 @@ class TimeDependentAdvectionDiffusionAffineReduced:
 
         # Reduced source term # TODO: Could be optimized and precomputed w/ affine decomposition
         S = dl.assemble(self.averaged_S_varf)
-        #  import pdb; pdb.set_trace()
         self.S_r = dl.Vector()
         Psi_p = dl.PETScMatrix(Psi)
         Psi_p.transpmult(S, self.S_r)
@@ -402,106 +399,117 @@ class TimeDependentAdvectionDiffusionAffineReduced:
         '''Specify the point x = [u,a,p] at which the Hessian operator (or the Gauss-Newton approximation)
         need to be evaluated. Nothing to do as internally solved values are saved.
         '''
+        raise NotImplementedError
         self.gauss_newton_approx = gauss_newton_approx
         return
 
     def applyC(self, first_variation, out):
-        out.zero()
-        self.k_first_var.vector().set_local(first_variation)
+        raise NotImplementedError
+        #  out.zero()
+        #  self.k_first_var.vector().set_local(first_variation)
 
-        for t in self.simulation_times[1:]:
-            self.u_s.retrieve(self.solved_u.vector(), t)
-            out.store(dl.assemble(self.C_form), t)
+        #  for t in self.simulation_times[1:]:
+            #  self.u_s.retrieve(self.solved_u.vector(), t)
+            #  out.store(dl.assemble(self.C_form), t)
 
     def solveFwdIncremental(self, sol, rhs):
         '''Solved the incremental forward problem obtained by taking the variation w.r.t.
         to adjoint variables in the meta-Lagrangian
         '''
-        sol.zero()
+        raise NotImplementedError
+        #  sol.zero()
 
-        # Set initial condition
-        self.u_old.vector().zero() # Zero initial condition for incremental forward
-        sol.store(self.u_old.vector(), 0.)
+        #  # Set initial condition
+        #  self.u_old.vector().zero() # Zero initial condition for incremental forward
+        #  sol.store(self.u_old.vector(), 0.)
 
-        u = dl.Vector()
-        self.M.init_vector(u, 0)
+        #  u = dl.Vector()
+        #  self.M.init_vector(u, 0)
 
-        C_rhs_n = dl.Vector()
-        self.M.init_vector(C_rhs_n, 0)
+        #  C_rhs_n = dl.Vector()
+        #  self.M.init_vector(C_rhs_n, 0)
 
-        for t in self.simulation_times[1::]:
-            L_incr, rhs_incr = dl.assemble_system(self.L_varf, self.L_rhs_varf)
-            rhs.retrieve(C_rhs_n, t)
-            rhs_incr.axpy(-0.1, C_rhs_n)
+        #  for t in self.simulation_times[1::]:
+            #  L_incr, rhs_incr = dl.assemble_system(self.L_varf, self.L_rhs_varf)
+            #  rhs.retrieve(C_rhs_n, t)
+            #  rhs_incr.axpy(-0.1, C_rhs_n)
 
-            dl.solve(L_incr, u, rhs_incr)
+            #  dl.solve(L_incr, u, rhs_incr)
 
-            sol.store(u, t)
-            self.u_old.vector().set_local(u)
+            #  sol.store(u, t)
+            #  self.u_old.vector().set_local(u)
     
     def applyWuu(self, du, out):
         '''Compute second variation of the misfit w.r.t state variables'''
-        out.zero()
-        self.misfit.apply_ij(STATE, STATE, du, out)
-        for vec in out.data:
-            vec *= -1.0
+        raise NotImplementedError
+        #  out.zero()
+        #  self.misfit.apply_ij(STATE, STATE, du, out)
+        #  for vec in out.data:
+            #  vec *= -1.0
 
     def applyWum(self, first_variation, out):
-        out.zero()
-        self.k_first_var.vector().set_local(first_variation)
+        raise NotImplementedError
+        #  out.zero()
+        #  self.k_first_var.vector().set_local(first_variation)
 
-        for t in self.simulation_times[::-1]:
-            self.p_s.retrieve(self.solved_p.vector(), t)
-            out.store(dl.assemble(self.W_um_form), t)
+        #  for t in self.simulation_times[::-1]:
+            #  self.p_s.retrieve(self.solved_p.vector(), t)
+            #  out.store(dl.assemble(self.W_um_form), t)
 
     def solveAdjIncremental(self, sol, rhs):
-        sol.zero()
+        raise NotImplementedError
+        #  sol.zero()
 
-        p = dl.Vector()
-        self.M.init_vector(p, 0)
-        self.p_old.vector().set_local(p)
+        #  p = dl.Vector()
+        #  self.M.init_vector(p, 0)
+        #  self.p_old.vector().set_local(p)
 
-        rhs_t = dl.Vector()
-        self.M.init_vector(rhs_t, 0)
+        #  rhs_t = dl.Vector()
+        #  self.M.init_vector(rhs_t, 0)
 
-        for t in self.simulation_times[::-1]:
-            Lt_incr, rhs_incr = dl.assemble_system(self.Lt_varf, self.Lt_rhs_varf)
-            rhs.retrieve(rhs_t, t)
-            rhs_incr.axpy(0.1, rhs_t)
+        #  for t in self.simulation_times[::-1]:
+            #  Lt_incr, rhs_incr = dl.assemble_system(self.Lt_varf, self.Lt_rhs_varf)
+            #  rhs.retrieve(rhs_t, t)
+            #  rhs_incr.axpy(0.1, rhs_t)
 
-            dl.solve(Lt_incr, p, rhs_incr)
-            self.p_old.vector().set_local(p)
-            sol.store(p, t)
+            #  dl.solve(Lt_incr, p, rhs_incr)
+            #  self.p_old.vector().set_local(p)
+            #  sol.store(p, t)
 
     def applyCt(self, dp, out):
-        out.zero()
-        for t in self.simulation_times[1::]:
-            self.u_s.retrieve(self.solved_u.vector(), t)
-            dp.retrieve(self.solved_p.vector(), t)
-            out.axpy(1., dl.assemble(self.grad_form))
+        raise NotImplementedError
+        #  out.zero()
+        #  for t in self.simulation_times[1::]:
+            #  self.u_s.retrieve(self.solved_u.vector(), t)
+            #  dp.retrieve(self.solved_p.vector(), t)
+            #  out.axpy(1., dl.assemble(self.grad_form))
 
     def applyWmu(self, du, out):
-        out.zero()
-        for t in self.simulation_times[1::]:
-            self.p_s.retrieve(self.solved_p.vector(), t)
-            du.retrieve(self.solved_u.vector(), t)
-            out.axpy(-1., dl.assemble(self.grad_form))
+        raise NotImplementedError
+        #  out.zero()
+        #  for t in self.simulation_times[1::]:
+            #  self.p_s.retrieve(self.solved_p.vector(), t)
+            #  du.retrieve(self.solved_u.vector(), t)
+            #  out.axpy(-1., dl.assemble(self.grad_form))
 
     def applyR(self, dm, out):
-        self.prior.R.mult(dm, out)
+        raise NotImplementedError
+        #  self.prior.R.mult(dm, out)
 
     def applyWmm(self, dm, out):
-        out.zero()
+        raise NotImplementedError
+        #  out.zero()
 
     def exportState(self, x, filename, varname):
         ''' TODO: Update these to be consistent with the problem being solved'''
-        out_file = dl.XDMFFile(self.Vh[STATE].mesh().mpi_comm(), filename)
-        out_file.parameters["functions_share_mesh"] = True
-        out_file.parameters["rewrite_function_mesh"] = False
-        ufunc = dl.Function(self.Vh[STATE], name=varname)
-        t = self.simulation_times[0]
-        out_file.write(vector2Function(
-            x[PARAMETER], self.Vh[STATE], name=varname), t)
-        for t in self.simulation_times[1:]:
-            x[STATE].retrieve(ufunc.vector(), t)
-            out_file.write(ufunc, t)
+        raise NotImplementedError
+        #  out_file = dl.XDMFFile(self.Vh[STATE].mesh().mpi_comm(), filename)
+        #  out_file.parameters["functions_share_mesh"] = True
+        #  out_file.parameters["rewrite_function_mesh"] = False
+        #  ufunc = dl.Function(self.Vh[STATE], name=varname)
+        #  t = self.simulation_times[0]
+        #  out_file.write(vector2Function(
+            #  x[PARAMETER], self.Vh[STATE], name=varname), t)
+        #  for t in self.simulation_times[1:]:
+            #  x[STATE].retrieve(ufunc.vector(), t)
+            #  out_file.write(ufunc, t)
