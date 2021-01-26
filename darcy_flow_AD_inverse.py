@@ -215,8 +215,6 @@ if __name__ == "__main__":
                 misfit_only=True,  verbose=(rank == 0), eps=eps, compute_hessian=False)
         plt.show()
 
-    debug = True
-    if debug:
         if rank == 0:
             print(sep, "Test the gradient of the parameter and state reduced model", sep)
         m0 = np.dot(problem.averaging_op, true_kappa[:])
@@ -230,135 +228,59 @@ if __name__ == "__main__":
         plt.show()
 
     def solve_reduced_w_error_estimate(kappa):
-        u_s = problem.generate_vector(STATE)
-        p_s = problem.generate_vector(ADJOINT)
-        u_FOM = [u_s, kappa, p_s]
-        problem.solveFwd(u_FOM[STATE], u_FOM)
-
-        utrue_r = problem.generate_vector("REDUCED_STATE")
-        #  avg_kappas = np.dot(problem.averaging_op, kappa[:])
-        #  x = [utrue_r, avg_kappas, None]
-
-        x = [utrue_r, kappa, None]
-        problem.solveReducedFwd(x[STATE], x)
-        problem.solveAdj(u_FOM[ADJOINT], u_FOM) # Computes full adjoint and estimates bound on error
-
-    solve_reduced_w_error_estimate(true_kappa)
-    #  true_kappa.set_local(0.001 * np.ones((problem.ndofs,)))
-
-    utrue_r = problem.generate_vector("REDUCED_STATE")
-    ptrue_r = problem.generate_vector("REDUCED_STATE")
-    avg_true_kappas = np.dot(problem.averaging_op, true_kappa[:]) 
-    x = [utrue_r, avg_true_kappas, ptrue_r]
-    problem.solveAffineROM(x[STATE], x)
+        u_s = problem_AROM.generate_vector(STATE)
+        p_s = problem_AROM.generate_vector(ADJOINT)
+        u_ROM = [u_s, np.dot(problem_AROM.averaging_op, kappa[:]), p_s]
+        problem_AROM.solveFwd(u_ROM[STATE], u_ROM)
+        problem_AROM.computeErrorEstimate(u_ROM)
 
     if debug:
-        nb.show_solution(Vh, u_0.vector(), problem.u_tildes, mytitle="Solution RB", \
+        avg_true_kappas = np.dot(problem_AROM.averaging_op, true_kappa[:]) 
+        x_r = problem_AROM.generate_vector()
+        x_r[PARAMETER] = avg_true_kappas
+        problem_AROM.solveFwd(x_r[STATE], x_r)
+        nb.show_solution(Vh, u_0.vector(), problem_AROM.u_tildes, mytitle="Affine ROM Sol", \
                 times=np.linspace(t_init, t_final, 6))
-        plt.show()
-    #  problem.solveAffineROMAdj(x[ADJOINT], x)
-    #  mg = problem.generate_vector(PARAMETER)
-    #  grad_norm_r = problem.evalGradientParameter(x, mg, use_ROM=True)
-    #  print(f"Norm of the reduced gradient {grad_norm_r}")
-
-    if debug:
-        # Finite element check for double reduced model (reduced parameter and space)
-        h = 1e-3 * np.random.randn(problem.n_sq**2)
-        #  parRandom.normal(1., h)
-        
-        u_r = problem.generate_vector("REDUCED_STATE")
-        p_r = problem.generate_vector("REDUCED_STATE")
-        avg_true_kappas = np.dot(problem.averaging_op, true_kappa[:]) 
-        x_r = [u_r, avg_true_kappas, p_r]
-        problem.solveAffineROM(x_r[0], x_r)
-        problem.solveAffineROMAdj(x_r[2], x_r)
-        x = [problem.u_tildes, \
-             averaged_params_to_func(avg_true_kappas, problem.a_dx, Vh).vector(), \
-             problem.p_tildes]
-        cx = problem.cost(x)
-        
-        #  grad_x = problem.generate_vector(PARAMETER)
-        #  problem.evalGradientParameter(x, grad_x, misfit_only=False, use_ROM=True)
-        grad_x = problem.evalGradientAveragedParameter(x, misfit_only=True)
-        grad_xh = np.dot(grad_x, h)
-        
-        n_eps = 32
-        eps = np.power(.5, np.arange(2, n_eps+2))
-        err_grad = np.zeros(n_eps)
-        
-        for i in range(n_eps):
-            my_eps = eps[i]
-            
-            u_r = problem.generate_vector("REDUCED_STATE")
-            p_r = problem.generate_vector("REDUCED_STATE")
-
-            #  k = problem.generate_vector(PARAMETER)
-            #  x_r_plus = [u_r, k, p_r]
-            #  x_r_plus[1].axpy(1., true_kappa)
-            #  x_r_plus[1].axpy(my_eps, h)
-
-            k = avg_true_kappas + my_eps * h
-            x_r_plus = [u_r, k, p_r]
-
-            problem.solveAffineROM(x_r_plus[0], x_r_plus)
-            problem.solveAffineROMAdj(x_r_plus[2], x_r_plus)
-            x_plus = [problem.u_tildes, \
-                    averaged_params_to_func(k, problem.a_dx, Vh).vector(), \
-                    problem.p_tildes]
-            
-            dc = problem.cost(x_plus)[2] - cx[2]
-            print(dc/my_eps)
-            err_grad[i] = abs(dc/my_eps - grad_xh)
-
-        print(f"grad_xh: {grad_xh}")
-        import pdb; pdb.set_trace()
-        plt.loglog(eps, err_grad, "-ob", eps, eps*(err_grad[0]/eps[0]), "-.k")
-        plt.title("FD Gradient Check for Reduced Model")
         plt.show()
 
     def reduced_cost_function(param):
         '''Cost function for reduced problem in numpy'''
-        u_r = problem.generate_vector("REDUCED_STATE")
-        p_r = problem.generate_vector("REDUCED_STATE")
-        k = problem.generate_vector(PARAMETER)
-        k.set_local(param)
-        x_r = [u_r, k, p_r]
-        problem.solveReducedFwd(x_r[STATE], x_r)
-        problem.solveReducedAdj(x_r[ADJOINT], x_r)
-        x = [problem.u_tildes, k, problem.p_tildes]
-        return problem.cost(x)[0]
+        x_r = problem_ROM.generate_vector()
+        x_r[PARAMETER].set_local(param)
+        problem_ROM.solveFwd(x_r[STATE], x_r)
+        problem_ROM.solveAdj(x_r[ADJOINT], x_r)
+        return problem_ROM.cost(x_r)[0]
 
     def reduced_gradient(param):
         '''Gradient of the cost function for the reduced problem in numpy'''
-        u_r = problem.generate_vector("REDUCED_STATE")
-        p_r = problem.generate_vector("REDUCED_STATE")
-        k = problem.generate_vector(PARAMETER)
-        k.set_local(param)
-        x_r = [u_r, k, p_r]
-        problem.solveReducedFwd(x_r[STATE], x_r)
-        problem.solveReducedAdj(x_r[ADJOINT], x_r)
+        x_r = problem_ROM.generate_vector()
+        x_r[PARAMETER].set_local(param)
+        problem_ROM.solveFwd(x_r[STATE], x_r)
+        problem_ROM.solveAdj(x_r[ADJOINT], x_r)
         grad_x = problem.generate_vector(PARAMETER)
-        problem.evalGradientParameter(x_r, grad_x, misfit_only=False, use_ROM=True)
+        problem_ROM.evalGradientParameter(x_r, grad_x, misfit_only=False)
         return grad_x[:]
 
     def affine_ROM_cost_function(param):
         '''Cost function for double reduced problem where parameters are spatial averages'''
-        u_r = problem.generate_vector("REDUCED_STATE")
+        u_r = problem_AROM.generate_vector(STATE)
         x_r = [u_r, param, None]
-        problem.solveAffineROM(x_r[STATE], x_r)
-        x = [problem.u_tildes, \
-             averaged_params_to_func(param, problem.a_dx, problem.Vh[PARAMETER]), \
+        problem_AROM.solveFwd(x_r[STATE], x_r)
+        x = [problem_AROM.u_tildes, \
+             averaged_params_to_func(param, problem_AROM.a_dx, problem_AROM.Vh[PARAMETER]), \
              None]
-        return problem.cost(x)[2]
+        return problem_AROM.cost(x)[2]
 
     def affine_ROM_gradient(param):
         '''Gradient of the cost function for the affinely decomposed reduced problem in numpy'''
-        u_r = problem.generate_vector("REDUCED_STATE")
-        p_r = problem.generate_vector("REDUCED_STATE")
+        u_r = problem_AROM.generate_vector(STATE)
+        p_r = problem_AROM.generate_vector(ADJOINT)
         x_r = [u_r, param, p_r]
-        problem.solveAffineROM(x_r[STATE], x_r)
-        problem.solveAffineROMAdj(x_r[ADJOINT], x_r)
-        return problem.evalGradientAveragedParameter(x_r, misfit_only=True)
+        problem_AROM.solveFwd(x_r[STATE], x_r)
+        problem_AROM.solveAdj(x_r[ADJOINT], x_r)
+        grad_x = np.zeros((problem.n_sq**2,))
+        problem_AROM.evalGradientParameter(x_r, grad_x, misfit_only=True)
+        return grad_x
 
     solve_reduced_inverse = "reduced_inverse" in sys.argv
 

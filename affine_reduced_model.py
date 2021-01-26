@@ -200,13 +200,18 @@ class TimeDependentAdvectionDiffusionAffineReduced:
             M_varf = ufl.inner(u_trial, u_test) * self.a_dx(i+1)
             N_varf = (ufl.inner(self.averaged_params[i] * ufl.grad(u_trial), ufl.grad(u_test))\
                     + ufl.inner(velocity, ufl.grad(u_trial)) * u_test) * self.a_dx(i+1)
+
+            Nt_varf = (ufl.inner(self.averaged_params[i] * ufl.grad(u_test), ufl.grad(u_trial)) \
+                + ufl.inner(velocity, ufl.grad(u_test)) * u_trial) * self.a_dx(i+1)
             self.dL_dsigmak[i, :, :] = self.dt * dl.assemble(ufl.inner(ufl.grad(u_trial), ufl.grad(u_test)) * self.a_dx(i+1)).array()
             
             if i==0:
                 self.averaged_L_varf = M_varf + dt_expr * N_varf
+                self.averaged_Lt_varf = M_varf + dt_expr * Nt_varf
                 self.averaged_S_varf = dt_expr * ufl.inner(source, u_test) * self.a_dx(i+1)
             else:
                 self.averaged_L_varf += M_varf + dt_expr * N_varf
+                self.averaged_Lt_varf += M_varf + dt_expr * Nt_varf
                 self.averaged_S_varf += dt_expr * ufl.inner(source, u_test) * self.a_dx(i+1)
 
         self.averaging_op = get_averaging_operator(self.Vh[PARAMETER], self.a_dx, self.n_sq)
@@ -393,6 +398,45 @@ class TimeDependentAdvectionDiffusionAffineReduced:
             grad += np.dot(A_i_u_tilde, self.solved_p.vector()[:])
 
         return grad
+
+    def computeErrorEstimate(self, x):
+        '''Solve adjoint problem backwards in time and store in out '''
+        residual_w_reduced = dl.Vector()
+        self.M.init_vector(residual_w_reduced, 0)
+
+        num_targets = len(self.misfit.ntargets)
+        num_obs_times = len(self.observation_times)
+        num_sim_times = len(self.simulation_times)
+        lam = np.zeros((num_sim_times, self.ndofs, num_targets))
+        
+        L_T = dl.assemble(self.averaged_Lt_varf).array()
+        M_T = self.Mt_stab.array()
+
+        self.qoi_bounds[:] = 0.0
+        self.approx_qoi_bounds[:] = 0.0
+        lam_old = np.linalg.solve(L_T, self.B_T)
+        lam[-1, :, :] = lam_old
+
+        for t_idx, t in enumerate(self.simulation_times[::-1]):
+            # TODO: Solve adjoint in a reduced space
+            self.approximate_residuals.retrieve(residual_w_reduced, t)
+
+            obs_idx = np.searchsorted(self.observation_times, t)
+            if t_idx > 0:
+                lam_old = np.linalg.solve(L_T, np.dot(M_T, lam_old))
+                lam[-(1+t_idx), :, :] = lam_old
+
+            for j in range(obs_idx, num_obs_times):
+                observation_time = self.observation_times[j]
+                timesteps_since_observation = int(np.rint((observation_time - t)/self.dt))
+                lam_idx = -(1 + timesteps_since_observation)
+                self.qoi_bounds[j, :] += np.dot(-lam[lam_idx, :, :].T, residual_w_reduced[:])
+                self.approx_qoi_bounds[j, :] += np.dot(np.abs(lam[lam_idx, :, :].T), np.abs(residual_w_reduced[:]))
+
+        if not np.all(self.approx_qoi_bounds > self.true_qoi_errors):
+            import pdb; pdb.set_trace()
+
+        return True
 
     def setPointForHessianEvaluations(self, x, gauss_newton_approx=False):
         '''Specify the point x = [u,a,p] at which the Hessian operator (or the Gauss-Newton approximation)

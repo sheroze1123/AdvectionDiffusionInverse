@@ -338,13 +338,6 @@ class TimeDependentAdvectionDiffusionReduced:
             self.L_p_tildes.retrieve(self.solved_p.vector(), t)
             mg.axpy(1., dl.assemble(self.grad_form))
 
-            #  self.u_tildes.retrieve(self.solved_u.vector(), t)
-            #  self.L_p_tildes.retrieve(self.solved_p.vector(), t)
-            #  mg.axpy(1., dl.assemble(self.grad_form))
-            #  self.L_u_tildes.retrieve(self.solved_u.vector(), t)
-            #  self.p_tildes.retrieve(self.solved_p.vector(), t)
-            #  mg.axpy(1., dl.assemble(self.grad_form))
-
         g = dl.Vector()
         self.M.init_vector(g,1)
         

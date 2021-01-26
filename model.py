@@ -328,12 +328,6 @@ class TimeDependentAdvectionDiffusion:
             self.averaged_params[p].assign(averaged_params[p])
         affine_L = dl.as_backend_type(dl.assemble(self.averaged_L_varf)).mat()
 
-        #  self.kappa.vector().set_local(
-                #  averaged_params_to_func(averaged_params, 
-                    #  self.a_dx, self.Vh[PARAMETER]).vector())
-        #  L = dl.as_backend_type(dl.assemble(self.L_varf)).mat()
-        #  affine_L = L
-
         Psi = affine_L.matMult(self.phi.mat()) # Petrov-Galerkin projection
         #  Psi = self.phi.mat() #Galerkin projection
 
@@ -453,8 +447,6 @@ class TimeDependentAdvectionDiffusion:
         out.zero()
         self.p_s.zero()
         self.kappa.vector().set_local(x[PARAMETER])
-        #  self.approx_kappa.vector().set_local(np.dot(self.parameter_proj, self.kappa.vector()[:]))
-        #  self.kappa.assign(self.approx_kappa)
 
         grad_state = TimeDependentVector(self.simulation_times)
         grad_state.initialize(self.M, 0)
@@ -575,11 +567,6 @@ class TimeDependentAdvectionDiffusion:
             self.averaged_params[p].assign(averaged_params[p])
         affine_L = dl.as_backend_type(dl.assemble(self.averaged_L_varf)).mat()
 
-        #  self.kappa.vector().set_local(
-                #  averaged_params_to_func(x[PARAMETER], 
-                    #  self.a_dx, self.Vh[PARAMETER]).vector())
-        #  L = dl.as_backend_type(dl.assemble(self.L_varf))
-
         grad_state = TimeDependentVector(self.simulation_times)
         grad_state.initialize(self.phi, 1)
         grad_state_snap = dl.Vector() 
@@ -620,14 +607,6 @@ class TimeDependentAdvectionDiffusion:
             p = dl.Vector()
             self.M.init_vector(p, 0)
             for t in self.simulation_times[1::]:
-                #  self.p_tildes.retrieve(self.solved_p.vector(), t)
-                #  self.approximate_residuals.retrieve(self.solved_u.vector(), t)
-                #  mg.axpy(1., dl.assemble(self.grad_form))
-
-                #  self.u_tildes.retrieve(self.solved_u.vector(), t)
-                #  self.L_p_tildes.retrieve(self.solved_p.vector(), t)
-                #  mg.axpy(1., dl.assemble(self.grad_form))
-
                 self.u_tildes.retrieve(self.solved_u.vector(), t)
                 self.L_p_tildes.retrieve(self.solved_p.vector(), t)
                 mg.axpy(1., dl.assemble(self.grad_form))
