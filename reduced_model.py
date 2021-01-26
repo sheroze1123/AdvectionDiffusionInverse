@@ -350,6 +350,24 @@ class TimeDependentAdvectionDiffusionReduced:
 
         return grad_norm
 
+    def cost_function(self, param):
+        '''Cost function for reduced problem in numpy'''
+        x_r = self.generate_vector()
+        x_r[PARAMETER].set_local(param)
+        self.solveFwd(x_r[STATE], x_r)
+        self.solveAdj(x_r[ADJOINT], x_r)
+        return self.cost(x_r)[0]
+
+    def gradient(self, param):
+        '''Gradient of the cost function for the reduced problem in numpy'''
+        x_r = self.generate_vector()
+        x_r[PARAMETER].set_local(param)
+        self.solveFwd(x_r[STATE], x_r)
+        self.solveAdj(x_r[ADJOINT], x_r)
+        grad_x = self.generate_vector(PARAMETER)
+        self.evalGradientParameter(x_r, grad_x, misfit_only=False)
+        return grad_x[:]
+
     def setPointForHessianEvaluations(self, x, gauss_newton_approx=False):
         '''Specify the point x = [u,a,p] at which the Hessian operator (or the Gauss-Newton approximation)
         need to be evaluated. Nothing to do as internally solved values are saved.

@@ -399,6 +399,28 @@ class TimeDependentAdvectionDiffusionAffineReduced:
 
         return grad
 
+    def cost_function(self, param):
+        '''Cost function for double reduced problem where parameters are spatial averages'''
+        u_r = self.generate_vector(STATE)
+        x_r = [u_r, param, None]
+        self.solveFwd(x_r[STATE], x_r)
+        x = [self.u_tildes, \
+             averaged_params_to_func(param, self.a_dx, self.Vh[PARAMETER]), \
+             None]
+        #TODO: Add regularization to parameters
+        return self.cost(x)[2]
+
+    def gradient(self, param):
+        '''Gradient of the cost function for the affinely decomposed reduced problem in numpy'''
+        u_r = self.generate_vector(STATE)
+        p_r = self.generate_vector(ADJOINT)
+        x_r = [u_r, param, p_r]
+        self.solveFwd(x_r[STATE], x_r)
+        self.solveAdj(x_r[ADJOINT], x_r)
+        grad_x = np.zeros((self.n_sq**2,))
+        self.evalGradientParameter(x_r, grad_x, misfit_only=True)
+        return grad_x
+
     def computeErrorEstimate(self, x):
         '''Solve adjoint problem backwards in time and store in out '''
         residual_w_reduced = dl.Vector()

@@ -243,61 +243,20 @@ if __name__ == "__main__":
                 times=np.linspace(t_init, t_final, 6))
         plt.show()
 
-    def reduced_cost_function(param):
-        '''Cost function for reduced problem in numpy'''
-        x_r = problem_ROM.generate_vector()
-        x_r[PARAMETER].set_local(param)
-        problem_ROM.solveFwd(x_r[STATE], x_r)
-        problem_ROM.solveAdj(x_r[ADJOINT], x_r)
-        return problem_ROM.cost(x_r)[0]
-
-    def reduced_gradient(param):
-        '''Gradient of the cost function for the reduced problem in numpy'''
-        x_r = problem_ROM.generate_vector()
-        x_r[PARAMETER].set_local(param)
-        problem_ROM.solveFwd(x_r[STATE], x_r)
-        problem_ROM.solveAdj(x_r[ADJOINT], x_r)
-        grad_x = problem.generate_vector(PARAMETER)
-        problem_ROM.evalGradientParameter(x_r, grad_x, misfit_only=False)
-        return grad_x[:]
-
-    def affine_ROM_cost_function(param):
-        '''Cost function for double reduced problem where parameters are spatial averages'''
-        u_r = problem_AROM.generate_vector(STATE)
-        x_r = [u_r, param, None]
-        problem_AROM.solveFwd(x_r[STATE], x_r)
-        x = [problem_AROM.u_tildes, \
-             averaged_params_to_func(param, problem_AROM.a_dx, problem_AROM.Vh[PARAMETER]), \
-             None]
-        return problem_AROM.cost(x)[2]
-
-    def affine_ROM_gradient(param):
-        '''Gradient of the cost function for the affinely decomposed reduced problem in numpy'''
-        u_r = problem_AROM.generate_vector(STATE)
-        p_r = problem_AROM.generate_vector(ADJOINT)
-        x_r = [u_r, param, p_r]
-        problem_AROM.solveFwd(x_r[STATE], x_r)
-        problem_AROM.solveAdj(x_r[ADJOINT], x_r)
-        grad_x = np.zeros((problem.n_sq**2,))
-        problem_AROM.evalGradientParameter(x_r, grad_x, misfit_only=True)
-        return grad_x
-
-    solve_reduced_inverse = "reduced_inverse" in sys.argv
-
-    if solve_reduced_inverse:
+    if "reduced_inverse" in sys.argv:
         starting_parameter_values = prior.mean[:]
         #  starting_parameter_values = dl.interpolate(dl.Constant(0.003), Vh).vector()[:]
         print(f'Starting cost: {reduced_cost_function(starting_parameter_values)}')
         bounds = Bounds(0.001, 0.006)
-        res = minimize(reduced_cost_function, starting_parameter_values, 
+        res = minimize(problem_ROM.cost_function, starting_parameter_values, 
                 method='L-BFGS-B', 
-                jac=reduced_gradient,
+                jac=problem_ROM.gradient,
                 bounds=bounds,
                 options={'ftol':1e-8, 'gtol':1e-8, 'maxls':20, 'iprint':11})
         print(f'\nstatus: {res.success}, message: {res.message}, n_it: {res.nit}')
         print(f'Minimum cost: {res.fun:.3F}')
 
-        reconstruction_ROM = problem.generate_vector(PARAMETER)
+        reconstruction_ROM = problem_ROM.generate_vector(PARAMETER)
         reconstruction_ROM.set_local(res.x)
         print(f"Relative reconstruction error with ROM forward: {dl.norm(reconstruction_ROM - true_kappa)/dl.norm(true_kappa)}")
 
@@ -306,6 +265,27 @@ if __name__ == "__main__":
         m_f.vector().set_local(reconstruction_ROM)
 
         nb.multi1_plot([true_kappa_f, m_f], ["True diffusion", "Solution ROM"], vmax=1.05*np.max(true_kappa[:]), vmin=0.95*np.min(true_kappa[:]))
+        plt.show()
+
+
+    if "affine_reduced_inverse" in sys.argv:
+        starting_parameter_values = 0.002 * np.ones((problem_AROM.n_sq**2,))
+        #  starting_parameter_values = dl.interpolate(dl.Constant(0.003), Vh).vector()[:]
+        print(f'Starting cost: {problem_AROM.cost_function(starting_parameter_values)}')
+        bounds = Bounds(0.001, 0.006)
+        res = minimize(problem_AROM.cost_function, starting_parameter_values, 
+                method='L-BFGS-B', 
+                jac=problem_AROM.gradient,
+                bounds=bounds,
+                options={'ftol':1e-8, 'gtol':1e-8, 'maxls':20, 'iprint':11})
+        print(f'\nstatus: {res.success}, message: {res.message}, n_it: {res.nit}')
+        print(f'Minimum cost: {res.fun:.3F}')
+
+        true_kappa_f.vector().set_local(true_kappa)
+        res_f = averaged_params_to_func(res.x, problem_AROM.a_dx, problem_AROM.Vh[PARAMETER])
+        print(f"Relative reconstruction error with Affine ROM forward: {dl.norm(res_f.vector() - true_kappa)/dl.norm(true_kappa)}")
+
+        nb.multi1_plot([true_kappa_f, res_f], ["True diffusion", "Solution ROM"], vmax=1.05*np.max(true_kappa[:]), vmin=0.95*np.min(true_kappa[:]))
         plt.show()
     ####################################################################
     # Learnt corrective term 
