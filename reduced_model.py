@@ -47,9 +47,11 @@ class TimeDependentAdvectionDiffusionReduced:
 
         # Trial and Test functions for the weak forms
         u_trial = dl.TrialFunction(Vh[STATE])
-        p_trial = dl.TrialFunction(Vh[ADJOINT])
+        #  p_trial = dl.TrialFunction(Vh[ADJOINT])
+        p_trial = u_trial
         u_test = dl.TestFunction(Vh[STATE])
-        p_test = dl.TestFunction(Vh[ADJOINT])
+        #  p_test = dl.TestFunction(Vh[ADJOINT])
+        p_test = u_test
 
         # Functions to be populated for time stepping
         self.u_old = dl.Function(Vh[STATE])
@@ -149,11 +151,8 @@ class TimeDependentAdvectionDiffusionReduced:
         self.u_tildes.initialize(self.M, 0)
         self.p_tildes = TimeDependentVector(self.simulation_times)
         self.p_tildes.initialize(self.M, 0)
-        self.L_u_tildes = TimeDependentVector(self.simulation_times)
-        self.L_u_tildes.initialize(self.M, 0)
         self.L_p_tildes = TimeDependentVector(self.simulation_times)
         self.L_p_tildes.initialize(self.M, 0)
-        # TODO, have L_phi and M_phi here for PG projection speed-up once affine decomposition is done
 
         # Setup required abjects for a posteriori error estimation
         self.approximate_residuals = TimeDependentVector(self.simulation_times)
@@ -225,7 +224,6 @@ class TimeDependentAdvectionDiffusionReduced:
         u_tilde = dl.Vector()
         self.M.init_vector(u_tilde, 0)
 
-        self.L_u_tildes.zero()
         L_u_tilde = dl.Vector()
         self.M.init_vector(L_u_tilde, 0)
 
@@ -242,13 +240,12 @@ class TimeDependentAdvectionDiffusionReduced:
         # Left-hand size of reduced system of equations
         self.L_r = dl.PETScMatrix(Psi.transposeMatMult(Psi))
 
-        # Reduced source term # TODO: Could be optimized and precomputed w/ affine decomposition
+        # Reduced source term 
         S = dl.assemble(self.S_varf)
         self.S_r = dl.Vector()
         Psi_p = dl.PETScMatrix(Psi)
         Psi_p.transpmult(S, self.S_r)
 
-        # Reduced mass matrix #TODO: Precompute w/ affine decomposition
         M_phi = dl.as_backend_type(self.M).mat().matMult(self.phi.mat())
         self.M_r = dl.PETScMatrix(Psi.transposeMatMult(M_phi))
 
@@ -266,7 +263,6 @@ class TimeDependentAdvectionDiffusionReduced:
             self.phi.mult(u_r, u_tilde)
             self.u_tildes.store(u_tilde, t)
             dl.PETScMatrix(L).mult(u_tilde, L_u_tilde)
-            self.L_u_tildes.store(L_u_tilde, t)
             residual_fom = L_u_tilde - S - M_u_tilde_prev
             self.approximate_residuals.store(residual_fom, t)
 
@@ -349,6 +345,74 @@ class TimeDependentAdvectionDiffusionReduced:
         grad_norm = g.inner(mg)
 
         return grad_norm
+
+    def computeQoIError(self, parameter):
+        self.u_s.zero()
+
+        # Set initial condition
+        self.u_old.assign(self.u_0)
+        self.u_s.store(self.u_old.vector(), 0.)
+
+        # Assemble LHS dependent on parameters
+        self.kappa.vector().set_local(parameter)
+        u = dl.Function(self.Vh[STATE])
+
+        for t in self.simulation_times[1::]:
+            rhs = self.L_rhs_varf + self.S_varf
+            dl.solve(self.L_varf == rhs, u)
+            self.u_s.store(u.vector(), t) 
+            self.u_old.assign(u)
+
+            if t in self.observation_times:
+                obs_idx = np.searchsorted(self.observation_times, t)
+                u_tilde = dl.Vector()
+                self.M.init_vector(u_tilde, 0)
+                self.u_tildes.retrieve(u_tilde, t)
+                true_e = np.dot(self.misfit.B.array(), u.vector()[:]) - np.dot(self.misfit.B.array(), u_tilde[:])
+                self.true_qoi_errors[obs_idx, :] = true_e
+
+    def computeErrorEstimate(self, x):
+        '''Solve adjoint problem backwards in time and store in out '''
+        self.computeQoIError(x[PARAMETER])
+
+        residual_w_reduced = dl.Vector()
+        self.M.init_vector(residual_w_reduced, 0)
+
+        num_targets = len(self.misfit.ntargets)
+        num_obs_times = len(self.observation_times)
+        num_sim_times = len(self.simulation_times)
+        lam = np.zeros((num_sim_times, self.ndofs, num_targets))
+        
+        self.kappa.vector().set_local(x[PARAMETER])
+        L_T = dl.assemble(self.Lt_varf).array()
+        M_T = self.Mt_stab.array()
+
+        self.qoi_bounds[:] = 0.0
+        self.approx_qoi_bounds[:] = 0.0
+        lam_old = np.linalg.solve(L_T, self.B_T)
+        lam[-1, :, :] = lam_old
+
+        for t_idx, t in enumerate(self.simulation_times[::-1]):
+            # TODO: Solve adjoint in a reduced space
+            self.approximate_residuals.retrieve(residual_w_reduced, t)
+
+            obs_idx = np.searchsorted(self.observation_times, t)
+            if t_idx > 0:
+                lam_old = np.linalg.solve(L_T, np.dot(M_T, lam_old))
+                lam[-(1+t_idx), :, :] = lam_old
+
+            for j in range(obs_idx, num_obs_times):
+                observation_time = self.observation_times[j]
+                timesteps_since_observation = int(np.rint((observation_time - t)/self.dt))
+                lam_idx = -(1 + timesteps_since_observation)
+                self.qoi_bounds[j, :] += np.dot(-lam[lam_idx, :, :].T, residual_w_reduced[:])
+                self.approx_qoi_bounds[j, :] += np.dot(np.abs(lam[lam_idx, :, :].T), np.abs(residual_w_reduced[:]))
+
+        if not (np.all(self.approx_qoi_bounds > self.true_qoi_errors) \
+                or np.allclose(self.qoi_bounds, self.true_qoi_errors)):
+            import pdb; pdb.set_trace()
+
+        return True
 
     def cost_function(self, param):
         '''Cost function for reduced problem in numpy'''

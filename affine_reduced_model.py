@@ -47,9 +47,11 @@ class TimeDependentAdvectionDiffusionAffineReduced:
 
         # Trial and Test functions for the weak forms
         u_trial = dl.TrialFunction(Vh[STATE])
-        p_trial = dl.TrialFunction(Vh[ADJOINT])
+        #  p_trial = dl.TrialFunction(Vh[ADJOINT])
+        p_trial = u_trial
         u_test = dl.TestFunction(Vh[STATE])
-        p_test = dl.TestFunction(Vh[ADJOINT])
+        #  p_test = dl.TestFunction(Vh[ADJOINT])
+        p_test = u_test
 
         # Functions to be populated for time stepping
         self.u_old = dl.Function(Vh[STATE])
@@ -328,14 +330,6 @@ class TimeDependentAdvectionDiffusionAffineReduced:
             residual_fom = L_u_tilde - S - M_u_tilde_prev
             self.approximate_residuals.store(residual_fom, t)
 
-            if t in self.observation_times:
-                obs_idx = np.searchsorted(self.observation_times, t)
-                u = dl.Vector()
-                self.M.init_vector(u, 0)
-                self.u_s.retrieve(u, t)
-                true_e = np.dot(self.misfit.B.array(), u[:]) - np.dot(self.misfit.B.array(), u_tilde[:])
-                self.true_qoi_errors[obs_idx, :] = true_e
-
     def solveAdj(self, out, x):
         '''Perform implicit time-stepping and solve the adjoint problem in the 
         reduced subpsace determined by the basis phi. Uses a Petrov-Galerkin projection'''
@@ -421,8 +415,42 @@ class TimeDependentAdvectionDiffusionAffineReduced:
         self.evalGradientParameter(x_r, grad_x, misfit_only=True)
         return grad_x
 
-    def computeErrorEstimate(self, x):
-        '''Solve adjoint problem backwards in time and store in out '''
+    def computeQoIError(self, parameter):
+        self.u_s.zero()
+
+        # Set initial condition
+        self.u_old.assign(self.u_0)
+        self.u_s.store(self.u_old.vector(), 0.)
+
+        # Assemble LHS dependent on parameters
+        self.kappa.vector().set_local(parameter)
+        u = dl.Function(self.Vh[STATE])
+
+        for t in self.simulation_times[1::]:
+            rhs = self.L_rhs_varf + self.S_varf
+            dl.solve(self.L_varf == rhs, u)
+            self.u_s.store(u.vector(), t) 
+            self.u_old.assign(u)
+
+            if t in self.observation_times:
+                obs_idx = np.searchsorted(self.observation_times, t)
+                u_tilde = dl.Vector()
+                self.M.init_vector(u_tilde, 0)
+                self.u_tildes.retrieve(u_tilde, t)
+                true_e = np.dot(self.misfit.B.array(), u.vector()[:]) - np.dot(self.misfit.B.array(), u_tilde[:])
+                self.true_qoi_errors[obs_idx, :] = true_e
+
+    def computeErrorEstimate(self, x, parameter):
+        '''Solve adjoint problem backwards in time and store in out.
+        Arguments:
+            x - hippylib state of the form [state_variable, parameter, adjoint_variable]
+            parameter - non-reduced parameter
+        '''
+
+        assert np.allclose(np.dot(self.averaging_op, parameter[:]), x[PARAMETER])
+        # Compute the true error and populate full-state in `self.u_s`
+        self.computeQoIError(parameter)
+
         residual_w_reduced = dl.Vector()
         self.M.init_vector(residual_w_reduced, 0)
 
@@ -431,7 +459,8 @@ class TimeDependentAdvectionDiffusionAffineReduced:
         num_sim_times = len(self.simulation_times)
         lam = np.zeros((num_sim_times, self.ndofs, num_targets))
         
-        L_T = dl.assemble(self.averaged_Lt_varf).array()
+        self.kappa.vector().set_local(parameter)
+        L_T = dl.assemble(self.Lt_varf).array()
         M_T = self.Mt_stab.array()
 
         self.qoi_bounds[:] = 0.0
@@ -455,6 +484,7 @@ class TimeDependentAdvectionDiffusionAffineReduced:
                 self.qoi_bounds[j, :] += np.dot(-lam[lam_idx, :, :].T, residual_w_reduced[:])
                 self.approx_qoi_bounds[j, :] += np.dot(np.abs(lam[lam_idx, :, :].T), np.abs(residual_w_reduced[:]))
 
+        import pdb; pdb.set_trace()
         if not np.all(self.approx_qoi_bounds > self.true_qoi_errors):
             import pdb; pdb.set_trace()
 

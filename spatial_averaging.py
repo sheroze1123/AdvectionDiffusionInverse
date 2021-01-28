@@ -3,21 +3,6 @@ from hippylib import *
 from matplotlib import pyplot as plt
 import numpy as np
 
-#  class SubBlock(SubDomain):
-    #  '''Defines a square subblock of the domain given bottom left anchor point and side length'''
-    #  def __init__(self, bot_left_x, bot_left_y, side_length, hmin, **kwargs):
-        #  self.bot_left_x = bot_left_x
-        #  self.bot_left_y = bot_left_y
-        #  self.side_length = side_length
-        #  self.hmin = hmin
-        #  super(SubBlock, self).__init__(**kwargs)
-
-    #  def inside(self, x, on_boundary):
-        #  e = self.hmin 
-        #  bw = between(x[0], (self.bot_left_x - e, self.bot_left_x + self.side_length + e)) and \
-                #  between(x[1], (self.bot_left_y - e, self.bot_left_y + self.side_length + e))
-        #  return bw
-
 def get_measures(mesh, nx):
     '''Get measures of each sub-domain assuming a unit square is divided into
     squares of equal side length nx'''
@@ -57,14 +42,6 @@ def averaged_params_to_func(averaged_params, dx, Vh):
     '''
     f = interpolate(Kappa(averaged_params), Vh)
     return f
-    #  pw_f  = Function(Vh)
-    #  subdomains = dx.subdomain_data()
-    #  for cell_no in range(len(subdomains.array())):
-        #  subdomain_no = int(subdomains.array()[cell_no])
-        #  print(f"subd no: {subdomain_no}")
-        #  pw_f.vector()[cell_no] = averaged_params[subdomain_no-1]
-
-    #  return pw_f
 
 def get_averaging_operator(Vh, dx, nx):
     ''' Obtain linear operator which acts on nodal values of the parameters
@@ -76,18 +53,3 @@ def get_averaging_operator(Vh, dx, nx):
         averaging_op = assemble(z * dx(i+1))/area
         operator[i, :] = averaging_op[:]
     return operator
-
-def avgf(avgs, Vh, dx, nx):
-    z = TestFunction(Vh)
-    operator = np.zeros((nx*nx, Vh.dim()))
-    varf = None
-    for i in range(nx * nx):
-        if varf is None:
-            varf = z * avgs[i] * dx(i+1) 
-        else:
-            varf += z * avgs[i] * dx(i+1)
-        #  area = assemble(Constant(1.0) * dx(i+1))
-        #  averaging_op = assemble(z * dx(i+1))/area
-        #  operator[i, :] = averaging_op[:]
-    return assemble(varf)
-    #  return operator

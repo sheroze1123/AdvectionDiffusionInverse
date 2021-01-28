@@ -227,6 +227,21 @@ if __name__ == "__main__":
                 misfit_only=True,  verbose=(rank == 0), eps=eps, compute_hessian=False)
         plt.show()
 
+        # Check a posteriori error estimate for affine ROM
+        u_ROM = problem_AROM.generate_vector()
+        u_ROM[PARAMETER][:] = np.dot(problem_AROM.averaging_op, true_kappa[:])
+        problem_AROM.solveFwd(u_ROM[STATE], u_ROM)
+        problem_AROM.computeErrorEstimate(u_ROM, true_kappa)
+        assert np.all(problem_AROM.approx_qoi_bounds > problem.true_qoi_errors)
+
+        # Check a posteriori error estimate for ROM
+        u_ROM = problem_ROM.generate_vector()
+        u_ROM[PARAMETER].set_local(true_kappa)
+        problem_ROM.solveFwd(u_ROM[STATE], u_ROM)
+        problem_ROM.computeErrorEstimate(u_ROM)
+        assert np.allclose(problem_ROM.true_qoi_errors, problem_ROM.qoi_bounds), \
+                "A posteriori error estimate is incorrect."
+
     def solve_reduced_w_error_estimate(kappa):
         u_s = problem_AROM.generate_vector(STATE)
         p_s = problem_AROM.generate_vector(ADJOINT)
@@ -287,6 +302,7 @@ if __name__ == "__main__":
 
         nb.multi1_plot([true_kappa_f, res_f], ["True diffusion", "Solution ROM"], vmax=1.05*np.max(true_kappa[:]), vmin=0.95*np.min(true_kappa[:]))
         plt.show()
+
     ####################################################################
     # Learnt corrective term 
     create_dataset = "dataset" in sys.argv

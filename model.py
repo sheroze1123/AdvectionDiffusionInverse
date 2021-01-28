@@ -483,19 +483,19 @@ class TimeDependentAdvectionDiffusion:
             #####################################################################
             # Dual-weighted residual computation
             # TODO: Solve adjoint in a reduced space
-            self.approximate_residuals.retrieve(residual_w_reduced, t)
+            #  self.approximate_residuals.retrieve(residual_w_reduced, t)
 
-            obs_idx = np.searchsorted(self.observation_times, t)
-            if t_idx > 0:
-                lam_old = np.linalg.solve(L_T, np.dot(M_T, lam_old))
-                lam[-(1+t_idx), :, :] = lam_old
+            #  obs_idx = np.searchsorted(self.observation_times, t)
+            #  if t_idx > 0:
+                #  lam_old = np.linalg.solve(L_T, np.dot(M_T, lam_old))
+                #  lam[-(1+t_idx), :, :] = lam_old
 
-            for j in range(obs_idx, num_obs_times):
-                observation_time = self.observation_times[j]
-                timesteps_since_observation = int(np.rint((observation_time - t)/self.dt))
-                lam_idx = -(1 + timesteps_since_observation)
-                self.qoi_bounds[j, :] += np.dot(-lam[lam_idx, :, :].T, residual_w_reduced[:])
-                self.approx_qoi_bounds[j, :] += np.dot(np.abs(lam[lam_idx, :, :].T), np.abs(residual_w_reduced[:]))
+            #  for j in range(obs_idx, num_obs_times):
+                #  observation_time = self.observation_times[j]
+                #  timesteps_since_observation = int(np.rint((observation_time - t)/self.dt))
+                #  lam_idx = -(1 + timesteps_since_observation)
+                #  self.qoi_bounds[j, :] += np.dot(-lam[lam_idx, :, :].T, residual_w_reduced[:])
+                #  self.approx_qoi_bounds[j, :] += np.dot(np.abs(lam[lam_idx, :, :].T), np.abs(residual_w_reduced[:]))
             #####################################################################
 
             grad_state.retrieve(grad_state_snap, t)
@@ -506,8 +506,8 @@ class TimeDependentAdvectionDiffusion:
             out.store(p, t)
             self.p_s.store(p, t) #TODO Fix duplicate storage
 
-        if not np.allclose(np.abs(self.true_qoi_errors), self.approx_qoi_bounds, rtol=1.0):
-            import pdb; pdb.set_trace()
+        #  if not np.allclose(np.abs(self.true_qoi_errors), self.approx_qoi_bounds, rtol=1.0):
+            #  import pdb; pdb.set_trace()
         return True
 
     def solveReducedAdj(self, out, x):
