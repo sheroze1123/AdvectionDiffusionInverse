@@ -201,6 +201,7 @@ if __name__ == "__main__":
     problem.set_reduced_basis(basis)
     problem_ROM.set_reduced_basis(basis)
     problem_AROM.set_reduced_basis(basis)
+    basis_size = basis.shape[1]
 
     if debug:
         if rank == 0:
@@ -232,7 +233,8 @@ if __name__ == "__main__":
         u_ROM[PARAMETER][:] = np.dot(problem_AROM.averaging_op, true_kappa[:])
         problem_AROM.solveFwd(u_ROM[STATE], u_ROM)
         problem_AROM.computeErrorEstimate(u_ROM, true_kappa)
-        assert np.all(problem_AROM.approx_qoi_bounds > problem.true_qoi_errors)
+        assert np.all(problem_AROM.approx_qoi_bounds > problem.true_qoi_errors), \
+                "A posteriori error estimate for affine ROM is incorrect."
 
         # Check a posteriori error estimate for ROM
         u_ROM = problem_ROM.generate_vector()
@@ -362,26 +364,28 @@ if __name__ == "__main__":
                 print("Large value in QoI encountered. Resampling...")
                 continue
 
-            r_snapshots = problem.generate_vector("REDUCED_STATE")
+            r_snapshots = problem_AROM.generate_vector(STATE)
             x_r_snapshots = [r_snapshots, np.dot(problem.averaging_op, kappa[:]), None]
-            problem.solveAffineROM(x_r_snapshots[STATE], x_r_snapshots)
+            problem_AROM.solveFwd(x_r_snapshots[STATE], x_r_snapshots)
 
             for time_idx, state in enumerate(x_r_snapshots[STATE].data):
                 reduced_state_values[sampling_idx, time_idx, :] = state[:] 
 
-            x = [problem.u_tildes, kappa, None]
+            x = [problem_AROM.u_tildes, kappa, None]
             misfit.observe(x, misfit.data)
 
             for time_idx, observation in enumerate(misfit.data.data):
                 reduced_qoi_values[sampling_idx, time_idx, :] = observation[:]
 
-            is_bound_valid = problem.solveAdj(x_snapshots[ADJOINT], x_snapshots)
+            is_bound_valid = problem_AROM.computeErrorEstimate(x_r_snapshots, kappa)
 
             if not is_bound_valid:
                 # Erroneous solution, retry
+                print("Invalid bounds, retrying...")
                 continue
+
             #  qoi_bounds[sampling_idx, :, :] = problem.qoi_bounds[:, :]
-            qoi_bounds[sampling_idx, :, :] = problem.approx_qoi_bounds[:, :]
+            qoi_bounds[sampling_idx, :, :] = problem_AROM.approx_qoi_bounds[:, :]
             sampling_idx += 1
 
         np.save('parameter_samples.npy', parameter_values)

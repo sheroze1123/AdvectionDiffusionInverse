@@ -484,9 +484,9 @@ class TimeDependentAdvectionDiffusionAffineReduced:
                 self.qoi_bounds[j, :] += np.dot(-lam[lam_idx, :, :].T, residual_w_reduced[:])
                 self.approx_qoi_bounds[j, :] += np.dot(np.abs(lam[lam_idx, :, :].T), np.abs(residual_w_reduced[:]))
 
-        import pdb; pdb.set_trace()
         if not np.all(self.approx_qoi_bounds > self.true_qoi_errors):
-            import pdb; pdb.set_trace()
+            print("Invalid error bounds")
+            return False
 
         return True
 
