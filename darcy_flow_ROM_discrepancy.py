@@ -70,7 +70,7 @@ reduced_basis        = np.load('reduced_basis.npy')
 reduced_state_values = np.load('reduced_state_samples.npy')
 reduced_qoi_values   = np.load('reduced_qoi_samples.npy')
 qoi_bounds = np.abs(np.load('qoi_bounds.npy'))
-a_idx = (np.max(qoi_values.reshape(10000,6000), axis=1) < 1)
+a_idx = (np.max(qoi_values.reshape(10000,qoi_values.shape[1] * qoi_values.shape[2]), axis=1) < 1)
 parameter_values = parameter_values[a_idx, :]
 state_values = state_values[a_idx, :, :]
 qoi_values = qoi_values[a_idx, :, :]
@@ -107,6 +107,42 @@ for idx in range(dataset_size):
     else:
         errors_validation[idx-tr_split, :] = qoi_errors[idx, :, :].reshape((qoi_dim,))
         bounds_validation[idx-tr_split, :] = 1.1 * qoi_bounds[idx, :, :].reshape((qoi_dim,))
+
+from skopt.space import Real, Integer, Categorical
+from skopt.utils import use_named_args
+from skopt import gp_minimize
+from skopt.plots import plot_convergence
+from tensorflow.keras.optimizers import Adam, RMSprop, Adadelta
+
+space = [Categorical(['elu', 'tanh'], name='activation'),
+         Categorical([Adam, Adadelta, ], name='optimizer'),
+         Real(1e-7, 1, prior="log-uniform", name='lr'),
+         Real(1e-9, 1e-2, prior='log-uniform', name='lr_decay'),
+         Integer(1, 6, name='n_hidden_layers'),
+         Integer(10, 100, name='n_weights'),
+         Integer(4, 500, name='batch_size')]
+
+@use_named_args(space)
+def objective(**params):
+    return parametric_model(**params, x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val, n_epochs=100)
+
+res_gp = gp_minimize(objective, space, n_calls=100, random_state=None)
+
+print("Best score: {}".format(res_gp.fun))
+print('''Best parameters:\n
+ Activation function: {}
+ Optimizer: {}
+ Learning rate: {}
+ Learning rate decay: {}
+ Num. hidden Layers: {}
+ Num. weights: {}
+ Batch size: {}'''.format(*res_gp.x))
+
+plot_convergence(res_gp, yscale="log")
+plt.show()
+
+
+
 
 n_weights = 500
 n_training_epochs = 5000

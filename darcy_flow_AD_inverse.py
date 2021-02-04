@@ -26,9 +26,11 @@ if __name__ == "__main__":
         pass
 
     # Possible command line arguments are 
-    #   "debug"
+    #   "debug" - turn on debug mode (finite difference gradient check, sample plots, etc.)
+    #   "fom_inverse" (compute the inverse problem with FOM)
+    #   "affine_reduced_inverse"
     #   "reduced_inverse"
-    #   "dataset"
+    #   "dataset" (create a dataset for discrepancy function")
 
     # Turn on debug mode to plot all quantities and print debug values
     debug = "debug" in sys.argv
@@ -307,9 +309,9 @@ if __name__ == "__main__":
 
     ####################################################################
     # Learnt corrective term 
-    create_dataset = "dataset" in sys.argv
+    #  create_dataset = "dataset" in sys.argv
 
-    if create_dataset:
+    if "dataset" in sys.argv:
         prior_mean = prior.mean
         dataset_size = 10000
         parameter_values = np.zeros((dataset_size, Vh.dim()))
@@ -420,128 +422,129 @@ if __name__ == "__main__":
                 misfit_only=False,  verbose=(rank == 0), eps=eps)
         plt.show()
 
-    # Due to stellar naming conventions adopted by Hippylib, below means the true full Hessian
-    # not the 'reduced' Hessian. This can be changed to evaluate the Gauss-Newton Hessian by changing
-    # the member variable inside `problem`
-    H = ReducedHessian(problem, misfit_only=False)
-
-    if rank == 0:
-        print(sep, "Solve the optimization using inexact Newton CG", sep)
-
-    # Set the starting parameter to be the prior mean
-    [u, m, p] = problem.generate_vector()
-    m.set_local(prior.mean)
-    problem.solveFwd(u, [u, m, p])
-    problem.solveAdj(p, [u, m, p])
-    mg = problem.generate_vector(PARAMETER)
-    grad_norm = problem.evalGradientParameter([u, m, p], mg)
- 
-    if rank == 0:
-        print("(g,g) = ", grad_norm)
-
-    # Define parameters for the optimization
-    tol = 1e-8
-    c = 1e-4
-    max_iter = 60
-    plot_on = False
-
-    # initialize iteration counters
-    iter_count = 1
-    total_cg_iter = 0
-    converged = False
-
-    # initializations
-    g, m_delta = dl.Vector(), dl.Vector()
-    prior.init_vector(m_delta,0)
-    prior.init_vector(g,0)
-
-    m_prev = dl.Function(problem.Vh[PARAMETER])
-
-    [cost_old, misfit_old, reg_old] = problem.cost([u, m, p])
-    print( "Nit   CGit   cost          misfit        reg           sqrt(-G*D)    ||grad||       alpha  tolcg" )
-
-    while iter_count < max_iter and not converged:
-        problem.solveFwd(u, [u, m, p])
-        problem.solveAdj(p, [u, m, p])
-        grad_norm = problem.evalGradientParameter([u, m, p], mg)
-
-        # set the CG tolerance (use Eisenstat–Walker termination criterion)
-        if iter_count == 1:
-            grad_norm_ini = grad_norm
-        tol_cg = min(0.5, np.sqrt(grad_norm/grad_norm_ini))
-    
-        # Use Gauss-Newton approximation in the first few iterations. TODO: Currently turned off
-        problem.gauss_newton_approx = (iter_count < 1)
+    if "fom_inverse" in sys.argv:
+        # Due to stellar naming conventions adopted by Hippylib, below means the true full Hessian
+        # not the 'reduced' Hessian. This can be changed to evaluate the Gauss-Newton Hessian by changing
+        # the member variable inside `problem`
         H = ReducedHessian(problem, misfit_only=False)
 
-        solver = CGSolverSteihaug()
-        solver.set_operator(H)
-        solver.set_preconditioner(prior.Rsolver)
-        solver.parameters["rel_tolerance"] = tol_cg
-        solver.parameters["zero_initial_guess"] = True
-        solver.parameters["print_level"] = -1
+        if rank == 0:
+            print(sep, "Solve the optimization using inexact Newton CG", sep)
 
-        # solve the Newton system H m_delta = - grad(m)
-        solver.solve(m_delta, -mg)
-        total_cg_iter += H.ncalls
+        # Set the starting parameter to be the prior mean
+        [u, m, p] = problem.generate_vector()
+        m.set_local(prior.mean)
+        problem.solveFwd(u, [u, m, p])
+        problem.solveAdj(p, [u, m, p])
+        mg = problem.generate_vector(PARAMETER)
+        grad_norm = problem.evalGradientParameter([u, m, p], mg)
+     
+        if rank == 0:
+            print("(g,g) = ", grad_norm)
 
-        # Perform Armijo line search
-        alpha = 1.0
-        descent = False
-        no_backtrack = 0
-        m_prev.vector().set_local(m)
-        while descent == 0 and no_backtrack < 18:
-            m.axpy(alpha, m_delta )
+        # Define parameters for the optimization
+        tol = 1e-8
+        c = 1e-4
+        max_iter = 60
+        plot_on = False
 
-            # solve the state/forward problem
-            problem.solveFwd(u, [u,m,p])
+        # initialize iteration counters
+        iter_count = 1
+        total_cg_iter = 0
+        converged = False
 
-            # evaluate cost
-            [cost_new, misfit_new, reg_new] = problem.cost([u, m, p])
+        # initializations
+        g, m_delta = dl.Vector(), dl.Vector()
+        prior.init_vector(m_delta,0)
+        prior.init_vector(g,0)
 
-            # check if Armijo conditions are satisfied
-            if cost_new < (cost_old + alpha * c * mg.inner(m_delta)):
-                cost_old = cost_new
-                descent = True
-            else:
-                no_backtrack += 1
-                alpha *= 0.5
-                m.set_local(m_prev.vector())  # reset a
+        m_prev = dl.Function(problem.Vh[PARAMETER])
 
-        if not descent:
-            print("Line search failed. No descent achieved in 18 backtracking steps")
-            if debug:
-                current_parameter = dl.Function(Vh)
-                current_parameter.vector().set_local(m)
-                nb.plot(current_parameter)
-                plt.show()
-            break
+        [cost_old, misfit_old, reg_old] = problem.cost([u, m, p])
+        print( "Nit   CGit   cost          misfit        reg           sqrt(-G*D)    ||grad||       alpha  tolcg" )
 
-        # calculate sqrt(-G * D)
-        graddir = np.sqrt(-mg.inner(m_delta))
+        while iter_count < max_iter and not converged:
+            problem.solveFwd(u, [u, m, p])
+            problem.solveAdj(p, [u, m, p])
+            grad_norm = problem.evalGradientParameter([u, m, p], mg)
 
-        # Print the true error for debugging purposes
-        print(f"True relative error: {dl.norm(m - true_kappa)/dl.norm(true_kappa)}")
-
-        sp = ""
-        print( "%2d %2s %2d %3s %8.5e %1s %8.5e %1s %8.5e %1s %8.5e %1s %8.5e %1s %5.3e %1s %5.3e" % \
-            (iter_count, sp, H.ncalls, sp, cost_new, sp, misfit_new, sp, reg_new, sp, \
-             graddir, sp, grad_norm, sp, alpha, sp, tol_cg) )
+            # set the CG tolerance (use Eisenstat–Walker termination criterion)
+            if iter_count == 1:
+                grad_norm_ini = grad_norm
+            tol_cg = min(0.5, np.sqrt(grad_norm/grad_norm_ini))
         
-        # check for convergence
-        if grad_norm < tol and iter_count > 1:
-            converged = True
-            print(f"Newton's method converged in {iter_count} iterations")
-            print(f"Total number of CG iterations: {total_cg_iter}")
+            # Use Gauss-Newton approximation in the first few iterations. TODO: Currently turned off
+            problem.gauss_newton_approx = (iter_count < 1)
+            H = ReducedHessian(problem, misfit_only=False)
+
+            solver = CGSolverSteihaug()
+            solver.set_operator(H)
+            solver.set_preconditioner(prior.Rsolver)
+            solver.parameters["rel_tolerance"] = tol_cg
+            solver.parameters["zero_initial_guess"] = True
+            solver.parameters["print_level"] = -1
+
+            # solve the Newton system H m_delta = - grad(m)
+            solver.solve(m_delta, -mg)
+            total_cg_iter += H.ncalls
+
+            # Perform Armijo line search
+            alpha = 1.0
+            descent = False
+            no_backtrack = 0
+            m_prev.vector().set_local(m)
+            while descent == 0 and no_backtrack < 18:
+                m.axpy(alpha, m_delta )
+
+                # solve the state/forward problem
+                problem.solveFwd(u, [u,m,p])
+
+                # evaluate cost
+                [cost_new, misfit_new, reg_new] = problem.cost([u, m, p])
+
+                # check if Armijo conditions are satisfied
+                if cost_new < (cost_old + alpha * c * mg.inner(m_delta)):
+                    cost_old = cost_new
+                    descent = True
+                else:
+                    no_backtrack += 1
+                    alpha *= 0.5
+                    m.set_local(m_prev.vector())  # reset a
+
+            if not descent:
+                print("Line search failed. No descent achieved in 18 backtracking steps")
+                if debug:
+                    current_parameter = dl.Function(Vh)
+                    current_parameter.vector().set_local(m)
+                    nb.plot(current_parameter)
+                    plt.show()
+                break
+
+            # calculate sqrt(-G * D)
+            graddir = np.sqrt(-mg.inner(m_delta))
+
+            # Print the true error for debugging purposes
+            print(f"True relative error: {dl.norm(m - true_kappa)/dl.norm(true_kappa)}")
+
+            sp = ""
+            print( "%2d %2s %2d %3s %8.5e %1s %8.5e %1s %8.5e %1s %8.5e %1s %8.5e %1s %5.3e %1s %5.3e" % \
+                (iter_count, sp, H.ncalls, sp, cost_new, sp, misfit_new, sp, reg_new, sp, \
+                 graddir, sp, grad_norm, sp, alpha, sp, tol_cg) )
             
-        iter_count += 1
-    
-    if not converged:
-        print( "Newton's method did not converge in ", max_iter, " iterations" )
-    
-    true_kappa_f = dl.Function(Vh)
-    true_kappa_f.vector().set_local(true_kappa)
-    m_f = dl.Function(Vh)
-    m_f.vector().set_local(m)
-    nb.multi1_plot([true_kappa_f, m_f], ["True diffusion", "Solution"], vmax=1.05*np.max(true_kappa[:]), vmin=0.95*np.min(true_kappa[:]))
-    plt.show()
+            # check for convergence
+            if grad_norm < tol and iter_count > 1:
+                converged = True
+                print(f"Newton's method converged in {iter_count} iterations")
+                print(f"Total number of CG iterations: {total_cg_iter}")
+                
+            iter_count += 1
+        
+        if not converged:
+            print( "Newton's method did not converge in ", max_iter, " iterations" )
+        
+        true_kappa_f = dl.Function(Vh)
+        true_kappa_f.vector().set_local(true_kappa)
+        m_f = dl.Function(Vh)
+        m_f.vector().set_local(m)
+        nb.multi1_plot([true_kappa_f, m_f], ["True diffusion", "Solution"], vmax=1.05*np.max(true_kappa[:]), vmin=0.95*np.min(true_kappa[:]))
+        plt.show()
