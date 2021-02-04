@@ -14,6 +14,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.layers import *
 from tensorflow.keras.regularizers import l1_l2, l2, l1
 from tensorflow.keras.initializers import *
+from tensorflow.keras.activations import *
 from tensorflow.keras.callbacks import LearningRateScheduler
 
 from skopt.space import Real, Integer, Categorical
@@ -61,7 +62,7 @@ def parametric_model(
     y = Dense(n_weights, input_shape=(input_shape,), activation=None, 
             kernel_regularizer=l1_l2(1e-3, 1e-3))(inputs)
     out = residual_unit(y, activation, n_weights)
-    for i in range(1,n_layers):
+    for i in range(1, n_hidden_layers):
         out = residual_unit(out, activation, n_weights)
     out = BatchNormalization()(out)
     out = activation(out)
@@ -153,8 +154,8 @@ for idx in range(dataset_size):
         errors_validation[idx-tr_split, :] = qoi_errors[idx, :, :].reshape((qoi_dim,))
         bounds_validation[idx-tr_split, :] = bounds_slack * qoi_bounds[idx, :, :].reshape((qoi_dim,))
 
-space = [Categorical(['elu', 'tanh'], name='activation'),
-         Categorical([Adam, Adadelta, ], name='optimizer'),
+space = [Categorical([elu, tanh, relu], name='activation'),
+         Categorical([Adam, Adadelta], name='optimizer'),
          Real(1e-7, 1, prior="log-uniform", name='lr'),
          Real(1e-9, 1e-2, prior='log-uniform', name='lr_decay'),
          Integer(1, 6, name='n_hidden_layers'),
