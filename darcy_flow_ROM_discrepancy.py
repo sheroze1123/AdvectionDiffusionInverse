@@ -16,6 +16,13 @@ from tensorflow.keras.regularizers import l1_l2, l2, l1
 from tensorflow.keras.initializers import *
 from tensorflow.keras.callbacks import LearningRateScheduler
 
+from skopt.space import Real, Integer, Categorical
+from skopt.utils import use_named_args
+from skopt import gp_minimize
+from skopt.plots import plot_convergence
+from tensorflow.keras.optimizers import Adam, RMSprop, Adadelta
+
+
 def residual_unit(x, activation, n_weights, l1_reg=1e-8, l2_reg=1e-4):
     '''A single residual unit with a skip connection and batch normalization'''
     res = x
@@ -31,7 +38,24 @@ def residual_unit(x, activation, n_weights, l1_reg=1e-8, l2_reg=1e-4):
     out = add([res, out])
     return out
 
-def res_bn_fc_model(activation, optimizer, lr, n_layers, n_weights, input_shape, output_shape):
+def parametric_model(
+        activation, 
+        optimizer, 
+        lr, 
+        lr_decay, 
+        n_hidden_layers, 
+        n_weights, 
+        batch_size,
+        x_train,
+        y_train, 
+        x_val, 
+        y_val,
+        n_epochs=100,
+        model_return=False):
+
+    input_shape = x_train[0].shape[1]
+    output_shape = y_train.shape[1]
+
     inputs = Input(shape=(input_shape,))
     bound_input = Input(shape=(output_shape,))
     y = Dense(n_weights, input_shape=(input_shape,), activation=None, 
@@ -46,8 +70,27 @@ def res_bn_fc_model(activation, optimizer, lr, n_layers, n_weights, input_shape,
     multiplied = Multiply()([out, bound_input])
     model = Model(inputs=[inputs, bound_input], outputs=multiplied)
     #  model = Model(inputs=inputs, outputs=out)
-    model.compile(loss='mse', optimizer=optimizer(lr=lr), metrics=['mape'])
-    return model
+    model.compile(
+            loss='mse', 
+            optimizer=optimizer(lr=lr, decay=lr_decay), 
+            metrics=['mape'])
+    history = model.fit(
+            x_train, 
+            y_train, 
+            epochs=n_epochs, 
+            batch_size=batch_size,
+            validation_data=(x_val, y_val))
+
+    tr_losses = history.history['mape']
+    vmapes = history.history['val_mape']
+
+    # Mean Absolute Relative Error is the validation metric
+    vmape = vmapes[-1]
+
+    if model_return:
+        return vmape, model
+
+    return vmape
 
 initial_learning_rate = 1e-2
 def lr_schedule(epoch):
@@ -69,14 +112,15 @@ qoi_values           = np.load('qoi_samples.npy')
 reduced_basis        = np.load('reduced_basis.npy')        
 reduced_state_values = np.load('reduced_state_samples.npy')
 reduced_qoi_values   = np.load('reduced_qoi_samples.npy')
-qoi_bounds = np.abs(np.load('qoi_bounds.npy'))
-a_idx = (np.max(qoi_values.reshape(10000,qoi_values.shape[1] * qoi_values.shape[2]), axis=1) < 1)
-parameter_values = parameter_values[a_idx, :]
-state_values = state_values[a_idx, :, :]
-qoi_values = qoi_values[a_idx, :, :]
-reduced_state_values = reduced_state_values[a_idx, :, :]
-reduced_qoi_values = reduced_qoi_values[a_idx, :, :]
-qoi_bounds = qoi_bounds[a_idx, :, :]
+qoi_bounds           = np.load('qoi_bounds.npy')
+
+#  a_idx = (np.max(qoi_values.reshape(10000,qoi_values.shape[1] * qoi_values.shape[2]), axis=1) < 1)
+#  parameter_values = parameter_values[a_idx, :]
+#  state_values = state_values[a_idx, :, :]
+#  qoi_values = qoi_values[a_idx, :, :]
+#  reduced_state_values = reduced_state_values[a_idx, :, :]
+#  reduced_qoi_values = reduced_qoi_values[a_idx, :, :]
+#  qoi_bounds = qoi_bounds[a_idx, :, :]
 qoi_errors = qoi_values - reduced_qoi_values
 
 #  mean_parameter_value = np.mean(parameter_values)
@@ -100,19 +144,14 @@ bounds_validation = np.zeros((dataset_size - tr_split, qoi_dim))
 errors_train = np.zeros((tr_split, qoi_dim))
 errors_validation = np.zeros((dataset_size - tr_split, qoi_dim))
 
+bounds_slack = 1.0
 for idx in range(dataset_size):
     if idx < tr_split:
         errors_train[idx, :] = qoi_errors[idx, :, :].reshape((qoi_dim,))
-        bounds_train[idx, :] = 1.1 * qoi_bounds[idx, :, :].reshape((qoi_dim,))
+        bounds_train[idx, :] = bounds_slack * qoi_bounds[idx, :, :].reshape((qoi_dim,))
     else:
         errors_validation[idx-tr_split, :] = qoi_errors[idx, :, :].reshape((qoi_dim,))
-        bounds_validation[idx-tr_split, :] = 1.1 * qoi_bounds[idx, :, :].reshape((qoi_dim,))
-
-from skopt.space import Real, Integer, Categorical
-from skopt.utils import use_named_args
-from skopt import gp_minimize
-from skopt.plots import plot_convergence
-from tensorflow.keras.optimizers import Adam, RMSprop, Adadelta
+        bounds_validation[idx-tr_split, :] = bounds_slack * qoi_bounds[idx, :, :].reshape((qoi_dim,))
 
 space = [Categorical(['elu', 'tanh'], name='activation'),
          Categorical([Adam, Adadelta, ], name='optimizer'),
@@ -124,7 +163,12 @@ space = [Categorical(['elu', 'tanh'], name='activation'),
 
 @use_named_args(space)
 def objective(**params):
-    return parametric_model(**params, x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val, n_epochs=100)
+    return parametric_model(**params, 
+            x_train = [parameters_train, bounds_train],
+            y_train = errors_train, 
+            x_val = [parameters_validation, bounds_validation],
+            y_val = errors_validation, 
+            n_epochs = 100)
 
 res_gp = gp_minimize(objective, space, n_calls=100, random_state=None)
 
@@ -141,46 +185,25 @@ print('''Best parameters:\n
 plot_convergence(res_gp, yscale="log")
 plt.show()
 
+activation = res_gp.x[0]
+optimizer = res_gp.x[1]
+opt_lr = res_gp.x[2]
+lr_decay = res_gp.x[3]
+n_hidden_layers = res_gp.x[4]
+n_weights = res_gp.x[5]
+batch_size = res_gp.x[6]
+n_epochs = 10000
 
-
-
-n_weights = 500
-n_training_epochs = 5000
-n_batch_size = 50
-n_residual_units = 2
-model = res_bn_fc_model(
-        ELU(), Adam, initial_learning_rate, n_residual_units, n_weights, parameter_dim, qoi_dim)
-model.summary()
-
-cbks = [LearningRateScheduler(lr_schedule)]
-history = model.fit([parameters_train, bounds_train], errors_train, 
-        epochs=n_training_epochs, 
-        batch_size=n_batch_size, 
-        shuffle=True, 
-        validation_data=([parameters_validation, bounds_validation], errors_validation),
-        callbacks=cbks)
-#  history = model.fit(parameters_train, errors_train, 
-        #  epochs=n_training_epochs, 
-        #  batch_size=n_batch_size, 
-        #  shuffle=True, 
-        #  validation_data=(parameters_validation, errors_validation),
-        #  callbacks=cbks)
-
-#  # Plots the training and validation loss
-tr_losses = history.history['mape']
-vmapes = history.history['val_mape']
-plt.semilogy(tr_losses)
-plt.semilogy(vmapes)
-plt.legend(["Mean training error", "Mean validation error"], fontsize=10)
-plt.xlabel("Epoch", fontsize=10)
-plt.ylabel("Absolute percentage error", fontsize=10)
-plt.savefig('training_error_rom_dl.png', dpi=200)
-
-tr_losses = history.history['loss']
-vmapes = history.history['val_mse']
-plt.semilogy(tr_losses)
-plt.semilogy(vmapes)
-plt.legend(["Mean training error", "Mean validation error"], fontsize=10)
-plt.xlabel("Epoch", fontsize=10)
-plt.ylabel("Mean squared error", fontsize=10)
-plt.savefig('training_mse_rom_dl.png', dpi=200)
+vmape, model = parametric_model(activation, 
+        optimizer, 
+        opt_lr, 
+        lr_decay, 
+        n_hidden_layers, 
+        n_weights, 
+        batch_size,
+        [parameters_train, bounds_train],
+        errors_train, 
+        [parameters_validation, bounds_validation], 
+        errors_validation, 
+        n_epochs, 
+        model_return=True)
